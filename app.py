@@ -2,13 +2,12 @@ import streamlit as st
 import sqlite3
 import bcrypt
 import pandas as pd
+from docx import Document
+from docx.shared import Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 import io
 import datetime
 import urllib.parse
-import uuid
-import tempfile
-import os
-from fpdf import FPDF
 
 # ==========================================
 # KONFIGURASI HALAMAN & CSS
@@ -43,7 +42,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT, role TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS schedules (id INTEGER PRIMARY KEY AUTOINCREMENT, cabor TEXT, tanggal TEXT, tempat TEXT)''')
     
-    # Tabel untuk menyimpan file Laporan
+    # Tambahan: Tabel untuk menyimpan file Laporan
     c.execute('''CREATE TABLE IF NOT EXISTS reports (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, 
                     cabor TEXT, 
@@ -84,155 +83,60 @@ def get_current_time_id():
     return f"{hari[now.weekday()]}, {now.day} {bulan[now.month - 1]} {now.year} - {now.strftime('%H:%M')} WIB"
 
 # ==========================================
-# 2. FUNGSI GENERATE PDF (.pdf) PROFESIONAL
+# 2. FUNGSI GENERATE WORD (.docx)
 # ==========================================
-class PDFReport(FPDF):
-    def __init__(self, cabor, tanggal, tempat, report_code):
-        super().__init__()
-        self.cabor = cabor
-        self.tanggal = tanggal
-        self.tempat = tempat
-        self.report_code = report_code
+def generate_word_report(petugas_text, cabor, tanggal, tempat, catatan, fotos):
+    doc = Document()
+    
+    # Header Dokumen
+    head = doc.add_heading('LAPORAN MONITORING CABANG OLAHRAGA', 0)
+    head.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    def header(self):
-        # Kop Surat Resmi
-        self.set_font("Arial", "B", 16)
-        self.set_text_color(30, 58, 138) # Biru Navy KONI
-        self.cell(0, 8, "LAPORAN MONITORING CABANG OLAHRAGA", ln=True, align="C")
-        self.set_font("Arial", "B", 12)
-        self.set_text_color(100, 116, 139) # Abu-abu elegan
-        self.cell(0, 6, "BINPRES KONI KABUPATEN TANGERANG", ln=True, align="C")
-        
-        # Penomoran Otomatis
-        self.set_font("Arial", "", 10)
-        self.set_text_color(0, 0, 0)
-        self.cell(0, 6, f"No. Register: {self.report_code}", ln=True, align="C")
-        
-        self.ln(2)
-        # Garis Pembatas Header
-        self.set_draw_color(30, 58, 138)
-        self.set_line_width(0.8)
-        self.line(10, self.get_y(), 200, self.get_y())
-        self.ln(5)
-
-    def footer(self):
-        # Footer dengan teks Monitoring dan Nomor Halaman
-        self.set_y(-15)
-        self.set_font("Arial", "I", 9)
-        self.set_text_color(128, 128, 128)
-        self.set_draw_color(200, 200, 200)
-        self.set_line_width(0.3)
-        self.line(10, self.get_y() - 2, 200, self.get_y() - 2)
-        
-        self.cell(0, 10, "Monitoring KONI Kabupaten Tangerang", align="L")
-        self.cell(0, 10, f"Halaman {self.page_no()}", align="R")
-
-def generate_pdf_report(petugas_text, cabor, tanggal, tempat, catatan, fotos):
-    # Membuat Kode Unik Otomatis (Cth: MONEV/KONI-TNG/20260902/AB12CD)
-    date_str = datetime.datetime.now().strftime('%Y%m%d')
-    unique_id = str(uuid.uuid4())[:6].upper()
-    report_code = f"MONEV/KONI-TNG/{date_str}/{unique_id}"
+    # Info Jadwal
+    doc.add_paragraph(f"Cabang Olahraga\t: {cabor}")
+    doc.add_paragraph(f"Tanggal\t\t: {tanggal}")
+    doc.add_paragraph(f"Tempat\t\t: {tempat}\n")
     
-    pdf = PDFReport(cabor, tanggal, tempat, report_code)
-    pdf.add_page()
-    
-    # --- BAGIAN 1: INFO JADWAL ---
-    pdf.set_font("Arial", "B", 11)
-    pdf.set_fill_color(240, 248, 255) # Latar biru sangat muda
-    pdf.cell(0, 8, " A. INFORMASI KEGIATAN", ln=True, fill=True)
-    pdf.ln(3)
-    
-    pdf.set_font("Arial", "", 11)
-    pdf.cell(40, 6, "Cabang Olahraga", border=0)
-    pdf.cell(5, 6, ":", border=0)
-    pdf.multi_cell(0, 6, cabor)
-    
-    pdf.cell(40, 6, "Tanggal", border=0)
-    pdf.cell(5, 6, ":", border=0)
-    pdf.multi_cell(0, 6, tanggal)
-    
-    pdf.cell(40, 6, "Tempat", border=0)
-    pdf.cell(5, 6, ":", border=0)
-    pdf.multi_cell(0, 6, tempat)
-    pdf.ln(6)
-
-    # --- BAGIAN 2: TIM PETUGAS ---
-    pdf.set_font("Arial", "B", 11)
-    pdf.cell(0, 8, " B. TIM MONEV (PETUGAS)", ln=True, fill=True)
-    pdf.ln(3)
-    
-    pdf.set_font("Arial", "", 11)
+    # Daftar Petugas
+    doc.add_heading('Daftar Petugas:', level=3)
     petugas_list = [p.strip() for p in petugas_text.split('\n') if p.strip()]
     for i, p in enumerate(petugas_list, 1):
-        pdf.cell(10, 6, f"{i}.", align="R")
-        pdf.multi_cell(0, 6, p)
-    pdf.ln(6)
-    
-    # --- BAGIAN 3: CATATAN MONEV ---
-    pdf.set_font("Arial", "B", 11)
-    pdf.cell(0, 8, " C. CATATAN EVALUASI / HASIL MONITORING", ln=True, fill=True)
-    pdf.ln(3)
-    
-    pdf.set_font("Arial", "", 11)
-    # Parsing baris baru dengan aman ke dalam PDF
-    # Untuk FPDF standar, encode ke latin-1 dengan ignore untuk mengabaikan emoji jika ada
-    safe_catatan = catatan.replace('\r\n', '\n').encode('latin-1', 'ignore').decode('latin-1')
-    pdf.multi_cell(0, 6, safe_catatan)
-    
-    # --- BAGIAN 4: DOKUMENTASI FOTO ---
+        doc.add_paragraph(f"{i}. {p}")
+
+    # Catatan Evaluasi
+    doc.add_heading('\nCatatan Evaluasi / Hasil Monitoring:', level=3)
+    doc.add_paragraph(catatan)
+
+    # DOKUMENTASI
     if fotos:
-        pdf.add_page()
-        pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 8, "LAMPIRAN DOKUMENTASI", ln=True, align="C")
-        pdf.ln(5)
+        doc.add_page_break()
+        head_doc = doc.add_heading('Lampiran Foto Dokumentasi', level=2)
+        head_doc.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        doc.add_paragraph(f"Cabor: {cabor} | Tanggal: {tanggal}\n")
         
-        temp_files = []
-        x_start = 15
-        y_start = pdf.get_y()
-        img_width = 85
-        img_height = 65
-        x_offset = 95
-        y_offset = 75
-        col = 0
+        table = doc.add_table(rows=0, cols=2)
+        table.autofit = False 
         
-        for foto in fotos:
-            if pdf.get_y() + img_height > 270 and col == 0:
-                pdf.add_page()
-                y_start = pdf.get_y()
+        row_cells = None
+        for idx, foto in enumerate(fotos):
+            if idx % 2 == 0:
+                row_cells = table.add_row().cells
+            
+            cell = row_cells[idx % 2]
+            p = cell.paragraphs[0]
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = p.add_run()
             
             try:
-                # Membuat file temp sementara untuk memuat bytes ke FPDF
-                ext = ".jpg" if "jpg" in foto.name.lower() or "jpeg" in foto.name.lower() else ".png"
-                with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-                    tmp.write(foto.getvalue())
-                    temp_files.append(tmp.name)
-                    
-                    x_pos = x_start + (col * x_offset)
-                    y_pos = y_start
-                    
-                    pdf.image(tmp.name, x=x_pos, y=y_pos, w=img_width)
-                    
-                    col += 1
-                    if col > 1: # Pindah baris ke bawah setelah 2 kolom terisi
-                        col = 0
-                        y_start += y_offset
-                        pdf.set_y(y_start)
+                image_stream = io.BytesIO(foto.getvalue())
+                run.add_picture(image_stream, width=Inches(2.8)) 
             except Exception as e:
-                pdf.set_xy(x_start + (col * x_offset), y_start)
-                pdf.multi_cell(img_width, 10, f"(Gagal memuat: {str(e)})")
-                
-        # Membersihkan file cache memori server setelah dilebur ke PDF
-        for tmp_file in temp_files:
-            try:
-                os.remove(tmp_file)
-            except:
-                pass
+                run.add_text(f"(Gagal memuat gambar: {e})")
 
-    # Kembalikan output PDF langsung berupa ByteStream siap didownload
-    pdf_buffer = io.BytesIO()
-    pdf.output(pdf_buffer)
-    pdf_buffer.seek(0)
-    return pdf_buffer, report_code
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
 
 # ==========================================
 # 3. HALAMAN & ANTARMUKA PENGGUNA
@@ -326,7 +230,7 @@ else:
                 catatan = st.text_area("✍️ Catatan Evaluasi / Hasil Monitoring", height=150)
                 
                 st.markdown("**📸 Upload Foto Bukti (Bebas 2 s/d 5 Foto)**")
-                fotos = st.file_uploader("Otomatis digabung jadi 1 halaman PDF yang rapi.", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
+                fotos = st.file_uploader("Otomatis digabung jadi 1 halaman rapi di Word.", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
 
                 submit_laporan = st.button("📄 Generate & Simpan Laporan", use_container_width=True, type="primary")
 
@@ -340,15 +244,14 @@ else:
                 elif len(fotos) > 5:
                     st.error("🚨 Maksimal 5 foto dokumentasi agar muat 1 halaman.")
                 else:
-                    with st.spinner("⏳ Menyusun dokumen PDF resmi & menyimpan ke server..."):
-                        # Memanggil fungsi PDF yang baru
-                        pdf_file, report_code = generate_pdf_report(petugas_text, val_cabor, val_tanggal, val_tempat, catatan, fotos)
+                    with st.spinner("⏳ Menyusun dokumen laporan & menyimpan ke server..."):
+                        word_file = generate_word_report(petugas_text, val_cabor, val_tanggal, val_tempat, catatan, fotos)
                         
                         safe_date_name = val_tanggal.replace(" s/d ", "_").replace("-", "").replace("/", "")
-                        file_name_doc = f"Monev_{val_cabor.split()[0]}_{safe_date_name}.pdf"
+                        file_name_doc = f"Monev_{val_cabor.split()[0]}_{safe_date_name}.docx"
                         
                         # Simpan ke Database
-                        file_bytes = pdf_file.getvalue()
+                        file_bytes = word_file.getvalue()
                         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         
                         conn = sqlite3.connect(DB_NAME)
@@ -359,12 +262,12 @@ else:
                         conn.close()
                         
                         st.session_state['report_generated'] = True
-                        st.session_state['pdf_file'] = pdf_file
+                        st.session_state['word_file'] = word_file
                         st.session_state['file_name_doc'] = file_name_doc
                         
-                        # Update pesan WA dengan kode laporan
+                        # Update pesan WA (hanya memberitahu admin untuk cek aplikasi)
                         wa_number = "6285691860578"
-                        pesan = f"Halo Admin, Laporan Monitoring *{val_cabor}* (Tanggal Kegiatan: {val_tanggal}) dengan nomor register *{report_code}* telah selesai dibuat dan berhasil masuk ke sistem.\n\nSilakan login ke aplikasi dan buka menu *Arsip Laporan* untuk mengunduh dokumen."
+                        pesan = f"Halo Admin, Laporan Monitoring *{val_cabor}* (Tanggal Kegiatan: {val_tanggal}) telah selesai dibuat dan berhasil masuk ke sistem.\n\nSilakan login ke aplikasi dan buka menu *Arsip Laporan* untuk mengunduh dokumen."
                         wa_link = f"https://wa.me/{wa_number}?text={urllib.parse.quote(pesan)}"
                         st.session_state['wa_link'] = wa_link
             
@@ -374,10 +277,10 @@ else:
                 
                 with colA:
                     st.download_button(
-                        label="📥 Unduh Salinan PDF untuk Anda",
-                        data=st.session_state['pdf_file'],
+                        label="📥 Unduh Salinan untuk Anda",
+                        data=st.session_state['word_file'],
                         file_name=st.session_state['file_name_doc'],
-                        mime="application/pdf",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                         use_container_width=True
                     )
                 with colB:
@@ -422,7 +325,7 @@ else:
                                 label=f"Unduh '{file_name}'",
                                 data=file_data,
                                 file_name=file_name,
-                                mime="application/pdf",
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                                 use_container_width=True,
                                 type="primary"
                             )
