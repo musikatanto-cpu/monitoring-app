@@ -276,10 +276,23 @@ else:
         st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
         
         base_cabor = [
-            "ANGGAR (IKASI)", "ATLETIK (PASI)", "ANGKAT BESI (PABSI)", "BOLA BASKET (PERBASI)", 
-            "BOLA VOLI (PBVSI)", "BULU TANGKIS (PBSI)", "CATUR (PERCASI)", "E. SPORT",
-            "KARATE (FORKI)", "PENCAK SILAT (IPSI)", "RENANG (PRSI)", "SEPAK BOLA (Askab-PSSI)", 
-            "TAEKWONDO (TI)", "TENIS MEJA (PTMSI)", "TINJU (PERTINA)", "WUSHU (WI)"
+           "ANGGAR (IKASI)", "AERO SPORT (FASI)", "ARUNG JERAM (FAJI)", "ATLETIK (PASI)", 
+            "ANGKAT BESI (PABSI)", "ANGKAT BERAT (PABERSI)", "BINARAGA FITNESS (PBFI)", 
+            "BILIAR (POBSI)", "BALAP SEPEDA (ISSI)", "BOLA BASKET (PERBASI)", 
+            "BOLA SUNDUL (PERBOSI)", "BOLA VOLI (PBVSI)", "BOWLING (PBI)", 
+            "BRIDGE (GABSI)", "BULU TANGKIS (PBSI)", "BASEBALL & SOFTBALL (PERBASASI)", 
+            "BOLA TANGAN (ABTI)", "CATUR (PERCASI)", "CRICKET (PCI)", "DAYUNG (PODSI)", 
+            "DRUM BAND (PDBI)", "GOLF (PGI)", "GULAT (PGSI)", "GATEBALL (PERGATSI)", 
+            "HOCKEY (FHI)", "JUDO (PJSI)", "KEMPO (PERKEMI)", "KARATE (FORKI)", 
+            "LAYAR (PORLASI)", "MENEMBAK (PERBAKIN)", "MUAY THAI (M I)", "MOTOR (I M I)", 
+            "PANAHAN (PERPANI)", "PANJAT TEBING (FPTI)", "PENCAK SILAT (IPSI)", 
+            "PETANQUE (POPI)", "RENANG (PRSI)", "RUGBY (PRUI)", "SENAM (PERSANI)", 
+            "SEPAK BOLA (Askab-PSSI)", "SEPAK TAKRAW (PSTI)", "SEPATU RODA (PORSEROSI)", 
+            "SQUASH (P S I)", "TAEKWONDO (T I)", "TARUNG DERAJAT (KODRAT)", 
+            "TENIS LAPANGAN (PELTI)", "TENIS MEJA (PTMSI)", "TINJU (PERTINA)", 
+            "WUSHU (W I)", "WOODBALL (IwBA)", "KICKBOXING (KBI)", "E. SPORT", 
+            "FLOOR BALL", "MMA", "SELAM", "BARONGSAI (FOBI)", "JUJITSU (PBJI)", 
+            "KURASH", "PIKCLE BALL", "BAPOPSI", "PERWOSI", "SIWO"
         ]
         
         conn = sqlite3.connect(DB_NAME)
