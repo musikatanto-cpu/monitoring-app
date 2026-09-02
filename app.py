@@ -118,7 +118,6 @@ def generate_word_report(petugas_text, cabor, tanggal, tempat, catatan, fotos):
             
             try:
                 image_stream = io.BytesIO(foto.getvalue())
-                # Ukuran di-set ~2.8 inch agar dua kolom sejajar pas di kertas A4 (Margin standard)
                 run.add_picture(image_stream, width=Inches(2.8)) 
             except Exception as e:
                 run.add_text(f"(Gagal memuat gambar: {e})")
@@ -236,7 +235,10 @@ else:
                 else:
                     with st.spinner("⏳ Menyusun dokumen laporan..."):
                         word_file = generate_word_report(petugas_text, val_cabor, val_tanggal, val_tempat, catatan, fotos)
-                        file_name_doc = f"Monev_{val_cabor.split()[0]}_{val_tanggal.replace('-', '')}.docx"
+                        
+                        # Membersihkan string nama file dari karakter ilegal
+                        safe_date_name = val_tanggal.replace(" s/d ", "_").replace("-", "").replace("/", "")
+                        file_name_doc = f"Monev_{val_cabor.split()[0]}_{safe_date_name}.docx"
                         
                         st.session_state['report_generated'] = True
                         st.session_state['word_file'] = word_file
@@ -273,35 +275,19 @@ else:
         st.markdown(f"**Waktu Saat Ini:** {get_current_time_id()}")
         st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
         
-        # 1. Daftar Cabor Bawaan (Berdasarkan Gambar)
         base_cabor = [
-            "ANGGAR (IKASI)", "AERO SPORT (FASI)", "ARUNG JERAM (FAJI)", "ATLETIK (PASI)", 
-            "ANGKAT BESI (PABSI)", "ANGKAT BERAT (PABERSI)", "BINARAGA FITNESS (PBFI)", 
-            "BILIAR (POBSI)", "BALAP SEPEDA (ISSI)", "BOLA BASKET (PERBASI)", 
-            "BOLA SUNDUL (PERBOSI)", "BOLA VOLI (PBVSI)", "BOWLING (PBI)", "BRIDGE (GABSI)", 
-            "BULU TANGKIS (PBSI)", "BASEBALL & SOFTBALL (PERBASASI)", "BOLA TANGAN (ABTI)", 
-            "CATUR (PERCASI)", "CRICKET (PCI)", "DAYUNG (PODSI)", "DRUM BAND (PDBI)", 
-            "GOLF (PGI)", "GULAT (PGSI)", "GATEBALL (PERGATSI)", "HOCKEY (FHI)", "JUDO (PJSI)", 
-            "KEMPO (PERKEMI)", "KARATE (FORKI)", "LAYAR (PORLASI)", "MENEMBAK (PERBAKIN)", 
-            "MUAY THAI (MI)", "MOTOR (IMI)", "PANAHAN (PERPANI)", "PANJAT TEBING (FPTI)", 
-            "PENCAK SILAT (IPSI)", "PETANQUE (POPI)", "RENANG (PRSI)", "RUGBY (PRUI)", 
-            "SENAM (PERSANI)", "SEPAK BOLA (Askab-PSSI)", "SEPAK TAKRAW (PSTI)", 
-            "SEPATU RODA (PORSEROSI)", "SQUASH (PSI)", "TAEKWONDO (TI)", "TARUNG DERAJAT (KODRAT)", 
-            "TENIS LAPANGAN (PELTI)", "TENIS MEJA (PTMSI)", "TINJU (PERTINA)", "WUSHU (WI)", 
-            "WOODBALL (IWBA)", "KICKBOXING (KBI)", "E. SPORT", "FLOOR BALL", "MMA", "SELAM", 
-            "BARONGSAI (FOBI)", "JUJITSU (PBJI)", "KURASH", "PICKLE BALL", "BAPOPSI", 
-            "PERWOSI", "SIWO"
+            "ANGGAR (IKASI)", "ATLETIK (PASI)", "ANGKAT BESI (PABSI)", "BOLA BASKET (PERBASI)", 
+            "BOLA VOLI (PBVSI)", "BULU TANGKIS (PBSI)", "CATUR (PERCASI)", "E. SPORT",
+            "KARATE (FORKI)", "PENCAK SILAT (IPSI)", "RENANG (PRSI)", "SEPAK BOLA (Askab-PSSI)", 
+            "TAEKWONDO (TI)", "TENIS MEJA (PTMSI)", "TINJU (PERTINA)", "WUSHU (WI)"
         ]
         
-        # 2. Ambil Cabor tambahan yang sudah pernah dibuat di database (agar dinamis)
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
         c.execute("SELECT DISTINCT cabor FROM schedules")
         existing_cabors = [row[0] for row in c.fetchall()]
         conn.close()
         
-        # 3. Gabungkan dan hilangkan duplikat, lalu urutkan, dan tambahkan opsi "Lainnya" di akhir
-        # Note: Set digunakan untuk menghilangkan duplikat antara base_cabor dan existing_cabors
         combined_cabor = sorted(list(set(base_cabor + existing_cabors)))
         combined_cabor.append("➕ LAINNYA (Tambah Baru)")
         
@@ -312,33 +298,53 @@ else:
                 st.subheader("➕ Tambah Jadwal Baru")
                 with st.form("form_jadwal"):
                     
-                    # Logika Pemilihan Cabor (Smart Dropdown)
                     selected_cabor_option = st.selectbox("Pilih Cabang Olahraga", combined_cabor)
                     
-                    # Jika milih lainnya, munculkan Text Input
                     if selected_cabor_option == "➕ LAINNYA (Tambah Baru)":
                         custom_cabor = st.text_input("Ketik Nama Cabor Baru", placeholder="Cth: PANAHAN (PERPANI)")
                     else:
-                        custom_cabor = "" # Kosongkan jika memilih cabor yang sudah ada
+                        custom_cabor = "" 
                         
-                    new_tanggal = st.date_input("Tanggal Kegiatan", datetime.date.today())
+                    # MENGGUNAKAN TUPLE AGAR MENDUKUNG RENTANG TANGGAL
+                    new_tanggal = st.date_input(
+                        "Tanggal Kegiatan (Bisa pilih satu hari atau rentang hari)", 
+                        value=(datetime.date.today(), datetime.date.today())
+                    )
+                    
                     new_tempat = st.text_input("Tempat / Lokasi")
                     
                     submit_jadwal = st.form_submit_button("Simpan Jadwal", use_container_width=True)
                     
                     if submit_jadwal:
-                        # Tentukan cabor akhir yang disave
                         final_cabor = custom_cabor.strip().upper() if selected_cabor_option == "➕ LAINNYA (Tambah Baru)" else selected_cabor_option
+                        
+                        # LOGIKA PEMROSESAN RENTANG TANGGAL
+                        if isinstance(new_tanggal, tuple):
+                            if len(new_tanggal) == 2:
+                                if new_tanggal[0] == new_tanggal[1]:
+                                    # Jika hanya klik 1 tanggal
+                                    final_tanggal = new_tanggal[0].strftime("%d-%m-%Y")
+                                else:
+                                    # Jika klik tanggal awal dan akhir
+                                    final_tanggal = f"{new_tanggal[0].strftime('%d-%m-%Y')} s/d {new_tanggal[1].strftime('%d-%m-%Y')}"
+                            elif len(new_tanggal) == 1:
+                                final_tanggal = new_tanggal[0].strftime("%d-%m-%Y")
+                            else:
+                                final_tanggal = ""
+                        else:
+                            final_tanggal = new_tanggal.strftime("%d-%m-%Y")
                         
                         if selected_cabor_option == "➕ LAINNYA (Tambah Baru)" and not final_cabor:
                             st.warning("⚠️ Nama Cabang Olahraga baru tidak boleh kosong!")
                         elif not new_tempat:
                             st.warning("⚠️ Tempat/Lokasi tidak boleh kosong!")
+                        elif not final_tanggal:
+                            st.warning("⚠️ Tanggal kegiatan tidak boleh kosong! (Pilih dua kali untuk rentang)")
                         else:
                             conn = sqlite3.connect(DB_NAME)
                             c = conn.cursor()
                             c.execute("INSERT INTO schedules (cabor, tanggal, tempat) VALUES (?, ?, ?)", 
-                                      (final_cabor, str(new_tanggal), new_tempat))
+                                      (final_cabor, final_tanggal, new_tempat))
                             conn.commit()
                             conn.close()
                             st.success(f"✅ Jadwal {final_cabor} ditambahkan!")
