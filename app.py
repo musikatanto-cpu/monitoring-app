@@ -4,18 +4,32 @@ import bcrypt
 import pandas as pd
 from docx import Document
 from docx.shared import Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 import io
 import datetime
+import urllib.parse
 
 # ==========================================
-# KONFIGURASI HALAMAN
+# KONFIGURASI HALAMAN & CSS
 # ==========================================
 st.set_page_config(
-    page_title="Monitoring RIZAL DUDA",
-    page_icon="🏅",
+    page_title="Monitoring Binpres KONI",
+    page_icon="🏆",
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Custom CSS untuk Desain Keren & Profesional
+st.markdown("""
+    <style>
+    .main-header { font-size: 38px; font-weight: 800; color: #1E3A8A; text-align: center; margin-bottom: -10px; }
+    .sub-header { font-size: 18px; font-weight: 400; color: #64748B; text-align: center; margin-bottom: 30px; }
+    .stButton>button { border-radius: 8px; font-weight: 600; transition: 0.3s; }
+    .stButton>button:hover { transform: scale(1.02); }
+    .info-box { background-color: #F8FAFC; border-left: 5px solid #3B82F6; padding: 15px; border-radius: 5px; margin-bottom: 20px;}
+    .divider { height: 2px; background: linear-gradient(90deg, #1E3A8A 0%, #3B82F6 100%); margin: 20px 0; }
+    </style>
+""", unsafe_allow_html=True)
 
 # ==========================================
 # 1. KONFIGURASI DATABASE & AUTHENTICATION
@@ -25,20 +39,14 @@ DB_NAME = "monitoring.db"
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    # Tabel Users
-    c.execute('''CREATE TABLE IF NOT EXISTS users 
-                 (username TEXT PRIMARY KEY, password TEXT, role TEXT)''')
-    # Tabel Jadwal Monitoring
-    c.execute('''CREATE TABLE IF NOT EXISTS schedules 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, cabor TEXT, tanggal TEXT, tempat TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT, role TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS schedules (id INTEGER PRIMARY KEY AUTOINCREMENT, cabor TEXT, tanggal TEXT, tempat TEXT)''')
 
     # Buat akun admin default jika belum ada
     c.execute("SELECT * FROM users WHERE username='admin'")
     if not c.fetchone():
         hashed_pw = bcrypt.hashpw('admin123'.encode('utf-8'), bcrypt.gensalt())
-        c.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", 
-                  ('admin', hashed_pw, 'admin'))
-
+        c.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", ('admin', hashed_pw, 'admin'))
     conn.commit()
     conn.close()
 
@@ -55,38 +63,65 @@ def authenticate(username, password):
             return True, role
     return False, None
 
+# Fungsi Format Waktu Bahasa Indonesia
+def get_current_time_id():
+    now = datetime.datetime.now()
+    hari = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
+    bulan = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
+    return f"{hari[now.weekday()]}, {now.day} {bulan[now.month - 1]} {now.year} - {now.strftime('%H:%M')} WIB"
+
 # ==========================================
 # 2. FUNGSI GENERATE WORD (.docx)
 # ==========================================
 def generate_word_report(petugas_text, cabor, tanggal, tempat, catatan, fotos):
     doc = Document()
-    doc.add_heading('Laporan Monitoring Cabang Olahraga', 0)
+    
+    # Header Dokumen
+    head = doc.add_heading('LAPORAN MONITORING CABANG OLAHRAGA', 0)
+    head.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     # Info Jadwal
     doc.add_paragraph(f"Cabang Olahraga\t: {cabor}")
     doc.add_paragraph(f"Tanggal\t\t: {tanggal}")
-    doc.add_paragraph(f"Tempat\t\t: {tempat}")
+    doc.add_paragraph(f"Tempat\t\t: {tempat}\n")
     
-    # Daftar Petugas (Dinamis)
+    # Daftar Petugas
     doc.add_heading('Daftar Petugas:', level=3)
     petugas_list = [p.strip() for p in petugas_text.split('\n') if p.strip()]
     for i, p in enumerate(petugas_list, 1):
         doc.add_paragraph(f"{i}. {p}")
 
-    # Catatan
-    doc.add_heading('Catatan Evaluasi / Hasil Monitoring:', level=3)
+    # Catatan Evaluasi
+    doc.add_heading('\nCatatan Evaluasi / Hasil Monitoring:', level=3)
     doc.add_paragraph(catatan)
 
-    # Multi Foto Dokumentasi
+    # DOKUMENTASI (Pindah ke halaman baru agar rapi di 1 halaman)
     if fotos:
-        doc.add_heading('Foto Dokumentasi:', level=3)
+        doc.add_page_break()
+        head_doc = doc.add_heading('Lampiran Foto Dokumentasi', level=2)
+        head_doc.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        doc.add_paragraph(f"Cabor: {cabor} | Tanggal: {tanggal}\n")
+        
+        # Buat tabel 2 kolom agar muat banyak foto di 1 lembar
+        table = doc.add_table(rows=0, cols=2)
+        table.autofit = False 
+        
+        row_cells = None
         for idx, foto in enumerate(fotos):
+            if idx % 2 == 0:
+                row_cells = table.add_row().cells
+            
+            cell = row_cells[idx % 2]
+            p = cell.paragraphs[0]
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = p.add_run()
+            
             try:
                 image_stream = io.BytesIO(foto.getvalue())
-                # Menambahkan foto, diatur lebarnya agar tidak merusak margin kertas
-                doc.add_picture(image_stream, width=Inches(4.5)) 
+                # Ukuran di-set ~2.8 inch agar dua kolom sejajar pas di kertas A4 (Margin standard)
+                run.add_picture(image_stream, width=Inches(2.8)) 
             except Exception as e:
-                doc.add_paragraph(f"(Gagal memuat gambar ke-{idx+1}: {e})")
+                run.add_text(f"(Gagal memuat gambar: {e})")
 
     buffer = io.BytesIO()
     doc.save(buffer)
@@ -96,7 +131,6 @@ def generate_word_report(petugas_text, cabor, tanggal, tempat, catatan, fotos):
 # ==========================================
 # 3. HALAMAN & ANTARMUKA PENGGUNA
 # ==========================================
-
 init_db()
 
 if 'logged_in' not in st.session_state:
@@ -106,74 +140,235 @@ if 'logged_in' not in st.session_state:
 
 # --- HALAMAN LOGIN ---
 if not st.session_state['logged_in']:
-    col1, col2, col3 = st.columns([1, 2, 1])
+    st.markdown("<div class='main-header'>🏆 E-MONEV CABOR</div>", unsafe_allow_html=True)
+    st.markdown("<div class='sub-header'>Binpres KONI Kabupaten Tangerang</div>", unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
     
+    col1, col2, col3 = st.columns([1.5, 2, 1.5])
     with col2:
-        st.markdown("<h1 style='text-align: center;'>🏆</h1>", unsafe_allow_html=True)
-        st.markdown("<h2 style='text-align: center;'>APLIKASI MONITORING<br>RIZAL DUDA</h2>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align: center; color: gray;'>Binpres KONI Kabupaten Tangerang</p>", unsafe_allow_html=True)
-        st.markdown("---")
-        
-        st.info("💡 **Info Login Admin:** Username: `admin` | Password: `admin123`")
+        with st.container(border=True):
+            st.markdown("#### 🔐 Silakan Masuk")
+            with st.form("login_form"):
+                username_input = st.text_input("👤 Username")
+                password_input = st.text_input("🔑 Password", type="password")
+                submit_btn = st.form_submit_button("Masuk Sistem", use_container_width=True)
 
-        with st.form("login_form"):
-            username_input = st.text_input("👤 Username")
-            password_input = st.text_input("🔑 Password", type="password")
-            submit_btn = st.form_submit_button("Masuk Sistem", use_container_width=True)
-
-            if submit_btn:
-                is_auth, role = authenticate(username_input, password_input)
-                if is_auth:
-                    st.session_state['logged_in'] = True
-                    st.session_state['username'] = username_input
-                    st.session_state['role'] = role
-                    st.success("Login berhasil! Memuat dashboard...")
-                    st.rerun()
-                else:
-                    st.error("🚨 Username atau password salah!")
+                if submit_btn:
+                    is_auth, role = authenticate(username_input, password_input)
+                    if is_auth:
+                        st.session_state['logged_in'] = True
+                        st.session_state['username'] = username_input
+                        st.session_state['role'] = role
+                        st.rerun()
+                    else:
+                        st.error("🚨 Username atau password salah!")
 
 # --- HALAMAN UTAMA (SETELAH LOGIN) ---
 else:
-    # Sidebar Menu
-    st.sidebar.markdown("### 🏅 MONITORING RIZAL DUDA")
+    # Sidebar
+    st.sidebar.markdown("### 🏆 PANEL MONEV")
     st.sidebar.caption("Binpres KONI Kab. Tangerang")
+    st.sidebar.markdown(f"**🕒 Waktu Sistem:**\n*{get_current_time_id()}*")
     st.sidebar.markdown("---")
     
-    st.sidebar.success(f"👋 Halo, **{st.session_state['username'].upper()}**\n\n🛡️ Akses: **{st.session_state['role'].upper()}**")
+    st.sidebar.info(f"👤 **Login:** {st.session_state['username'].upper()}\n\n🛡️ **Role:** {st.session_state['role'].upper()}")
     
-    st.sidebar.markdown("#### 📌 Menu Navigasi")
-    
-    # Logika Akses Menu
-    menu = ["📝 Ambil Jadwal & Isi Form"]
+    # Menu Navigasi Berdasarkan Role
     if st.session_state['role'] == 'admin':
-        menu.insert(0, "📅 Kelola Jadwal (Admin)")
-        menu.insert(1, "👥 Kelola User (Admin)")
+        menu = ["📅 Kelola Jadwal (Admin)", "👥 Kelola User (Admin)", "📝 Coba Isi Laporan"]
+        choice = st.sidebar.radio("📌 Navigasi Admin:", menu)
+    else:
+        choice = "📝 Isi Form Laporan"
+        st.sidebar.success("✅ Silakan isi form laporan di panel kanan.")
 
-    choice = st.sidebar.radio("", menu)
-    
     st.sidebar.markdown("---")
-    if st.sidebar.button("🚪 Logout", use_container_width=True):
-        st.session_state['logged_in'] = False
-        st.session_state['username'] = ''
-        st.session_state['role'] = ''
+    if st.sidebar.button("🚪 Keluar (Logout)", use_container_width=True, type="secondary"):
+        st.session_state.clear()
         st.rerun()
 
+    # ----------------------------------------------------
+    # HALAMAN UNTUK USER: FORM LAPORAN
+    # ----------------------------------------------------
+    if choice in ["📝 Isi Form Laporan", "📝 Coba Isi Laporan"]:
+        st.markdown(f"### 📝 Form Laporan Monitoring")
+        st.markdown(f"**Tanggal Hari Ini:** {get_current_time_id()}")
+        st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
+        
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute("SELECT id, cabor, tanggal, tempat FROM schedules")
+        schedules_data = c.fetchall()
+        conn.close()
+
+        if not schedules_data:
+            st.warning("⚠️ Belum ada jadwal monitoring yang tersedia. Harap hubungi Admin.")
+        else:
+            schedule_options = {f"{s[1]} | {s[2]} | {s[3]}": s for s in schedules_data}
+            selected_label = st.selectbox("📌 1. Pilih Jadwal Monitoring yang Tersedia", list(schedule_options.keys()))
+            selected_schedule = schedule_options[selected_label]
+            
+            val_cabor = selected_schedule[1]
+            val_tanggal = selected_schedule[2]
+            val_tempat = selected_schedule[3]
+
+            with st.container(border=True):
+                st.markdown("#### 📋 2. Detail Evaluasi & Dokumentasi")
+                
+                petugas_text = st.text_area("👤 Daftar Petugas (Tulis 1 nama per baris)", 
+                                           placeholder="Contoh:\nBudi Santoso\nAndi Saputra", height=100)
+                
+                catatan = st.text_area("✍️ Catatan Evaluasi / Hasil Monitoring", height=150)
+                
+                st.markdown("**📸 Upload Foto Bukti (Bebas 2 s/d 5 Foto)**")
+                fotos = st.file_uploader("Otomatis digabung jadi 1 halaman rapi di Word.", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
+
+                submit_laporan = st.button("📄 Generate Dokumen Laporan", use_container_width=True, type="primary")
+
+            if submit_laporan:
+                if not petugas_text.strip():
+                    st.error("⚠️ Harap isi minimal 1 nama petugas!")
+                elif not catatan.strip():
+                    st.error("⚠️ Catatan evaluasi tidak boleh kosong!")
+                elif len(fotos) < 2:
+                    st.error("🚨 Minimal unggah 2 foto dokumentasi.")
+                elif len(fotos) > 5:
+                    st.error("🚨 Maksimal 5 foto dokumentasi agar muat 1 halaman.")
+                else:
+                    with st.spinner("⏳ Menyusun dokumen laporan..."):
+                        word_file = generate_word_report(petugas_text, val_cabor, val_tanggal, val_tempat, catatan, fotos)
+                        file_name_doc = f"Monev_{val_cabor.split()[0]}_{val_tanggal.replace('-', '')}.docx"
+                        
+                        st.session_state['report_generated'] = True
+                        st.session_state['word_file'] = word_file
+                        st.session_state['file_name_doc'] = file_name_doc
+                        
+                        wa_number = "6285691860578"
+                        pesan = f"Halo Admin, berikut adalah Laporan Monitoring *{val_cabor}*.\nTanggal: {val_tanggal}\nTempat: {val_tempat}\n\nLaporan telah saya unduh, berikut adalah file lampirannya."
+                        wa_link = f"https://wa.me/{wa_number}?text={urllib.parse.quote(pesan)}"
+                        st.session_state['wa_link'] = wa_link
+            
+            if st.session_state.get('report_generated', False):
+                st.success("🎉 **Laporan Selesai! Ikuti 2 langkah di bawah ini:**")
+                colA, colB = st.columns(2)
+                
+                with colA:
+                    st.download_button(
+                        label="📥 1. Unduh Laporan Word (.docx)",
+                        data=st.session_state['word_file'],
+                        file_name=st.session_state['file_name_doc'],
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        use_container_width=True
+                    )
+                with colB:
+                    st.link_button("📲 2. Kirim Laporan via WhatsApp Admin", 
+                                   st.session_state['wa_link'], 
+                                   use_container_width=True)
+                    st.caption("*(Pastikan Anda melampirkan/attach file yang baru saja diunduh saat jendela WhatsApp terbuka)*")
 
     # ----------------------------------------------------
-    # MENU: KELOLA USER (ADMIN ONLY)
+    # MENU ADMIN: KELOLA JADWAL
     # ----------------------------------------------------
-    if choice == "👥 Kelola User (Admin)":
-        st.title("👥 Manajemen Pengguna")
+    elif choice == "📅 Kelola Jadwal (Admin)":
+        st.markdown(f"### 📅 Kelola Jadwal Monitoring")
+        st.markdown(f"**Waktu Saat Ini:** {get_current_time_id()}")
+        st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
         
-        tab1, tab2 = st.tabs(["Daftar Pengguna", "Tambah Pengguna Baru"])
+        # 1. Daftar Cabor Bawaan (Default)
+        base_cabor = [
+            "ANGGAR (IKASI)", "ATLETIK (PASI)", "ANGKAT BESI (PABSI)", "BOLA BASKET (PERBASI)", 
+            "BOLA VOLI (PBVSI)", "BULU TANGKIS (PBSI)", "CATUR (PERCASI)", "E. SPORT",
+            "KARATE (FORKI)", "PENCAK SILAT (IPSI)", "RENANG (PRSI)", "SEPAK BOLA (Askab-PSSI)", 
+            "TAEKWONDO (TI)", "TENIS MEJA (PTMSI)", "TINJU (PERTINA)", "WUSHU (WI)"
+        ]
+        
+        # 2. Ambil Cabor tambahan yang sudah pernah dibuat di database (agar dinamis)
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute("SELECT DISTINCT cabor FROM schedules")
+        existing_cabors = [row[0] for row in c.fetchall()]
+        conn.close()
+        
+        # 3. Gabungkan dan hilangkan duplikat, lalu urutkan abjad, dan tambahkan opsi "Lainnya" di akhir
+        combined_cabor = sorted(list(set(base_cabor + existing_cabors)))
+        combined_cabor.append("➕ LAINNYA (Tambah Baru)")
+        
+        col_form, col_data = st.columns([1, 1.5])
+        
+        with col_form:
+            with st.container(border=True):
+                st.subheader("➕ Tambah Jadwal Baru")
+                with st.form("form_jadwal"):
+                    
+                    # Logika Pemilihan Cabor (Smart Dropdown)
+                    selected_cabor_option = st.selectbox("Pilih Cabang Olahraga", combined_cabor)
+                    
+                    # Jika milih lainnya, munculkan Text Input
+                    if selected_cabor_option == "➕ LAINNYA (Tambah Baru)":
+                        custom_cabor = st.text_input("Ketik Nama Cabor Baru", placeholder="Cth: PANAHAN (PERPANI)")
+                    else:
+                        custom_cabor = "" # Kosongkan jika memilih cabor yang sudah ada
+                        
+                    new_tanggal = st.date_input("Tanggal Kegiatan", datetime.date.today())
+                    new_tempat = st.text_input("Tempat / Lokasi")
+                    
+                    submit_jadwal = st.form_submit_button("Simpan Jadwal", use_container_width=True)
+                    
+                    if submit_jadwal:
+                        # Tentukan cabor akhir yang disave
+                        final_cabor = custom_cabor.strip().upper() if selected_cabor_option == "➕ LAINNYA (Tambah Baru)" else selected_cabor_option
+                        
+                        if selected_cabor_option == "➕ LAINNYA (Tambah Baru)" and not final_cabor:
+                            st.warning("⚠️ Nama Cabang Olahraga baru tidak boleh kosong!")
+                        elif not new_tempat:
+                            st.warning("⚠️ Tempat/Lokasi tidak boleh kosong!")
+                        else:
+                            conn = sqlite3.connect(DB_NAME)
+                            c = conn.cursor()
+                            c.execute("INSERT INTO schedules (cabor, tanggal, tempat) VALUES (?, ?, ?)", 
+                                      (final_cabor, str(new_tanggal), new_tempat))
+                            conn.commit()
+                            conn.close()
+                            st.success(f"✅ Jadwal {final_cabor} ditambahkan!")
+                            st.rerun()
+                        
+        with col_data:
+            with st.container(border=True):
+                st.subheader("📋 Daftar Jadwal Aktif")
+                conn = sqlite3.connect(DB_NAME)
+                jadwal_df = pd.read_sql_query("SELECT id as ID, cabor as Cabor, tanggal as Tanggal, tempat as Tempat FROM schedules", conn)
+                conn.close()
+                
+                if jadwal_df.empty:
+                    st.info("Belum ada jadwal yang dibuat.")
+                else:
+                    st.dataframe(jadwal_df, use_container_width=True, hide_index=True)
+                    with st.expander("🗑️ Hapus Jadwal"):
+                        del_id = st.selectbox("Pilih ID Jadwal yang akan dihapus", jadwal_df['ID'].tolist())
+                        if st.button("Hapus Jadwal", type="primary"):
+                            conn = sqlite3.connect(DB_NAME)
+                            c = conn.cursor()
+                            c.execute("DELETE FROM schedules WHERE id=?", (del_id,))
+                            conn.commit()
+                            conn.close()
+                            st.success("Jadwal berhasil dihapus!")
+                            st.rerun()
+
+    # ----------------------------------------------------
+    # MENU ADMIN: KELOLA USER
+    # ----------------------------------------------------
+    elif choice == "👥 Kelola User (Admin)":
+        st.markdown(f"### 👥 Manajemen Pengguna")
+        st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
+        
+        tab1, tab2 = st.tabs(["📋 Daftar Pengguna", "➕ Tambah Pengguna Baru"])
         with tab1:
             conn = sqlite3.connect(DB_NAME)
-            users_df = pd.read_sql_query("SELECT username, role FROM users", conn)
+            users_df = pd.read_sql_query("SELECT username as Username, role as 'Hak Akses' FROM users", conn)
             conn.close()
-            st.dataframe(users_df, use_container_width=True)
+            st.dataframe(users_df, use_container_width=True, hide_index=True)
 
             with st.expander("🗑️ Hapus Pengguna", expanded=False):
-                del_user = st.selectbox("Pilih pengguna yang akan dihapus", users_df['username'].tolist())
+                del_user = st.selectbox("Pilih pengguna yang akan dihapus", users_df['Username'].tolist())
                 if st.button("Hapus Akun", type="primary"):
                     if del_user == 'admin':
                         st.error("⚠️ Tidak bisa menghapus akun admin utama!")
@@ -187,158 +382,26 @@ else:
                         st.rerun()
 
         with tab2:
-            with st.form("add_user_form"):
-                new_username = st.text_input("👤 Username Baru")
-                new_password = st.text_input("🔑 Password Baru", type="password")
-                new_role = st.selectbox("🛡️ Hak Akses (Role)", ["user", "admin"])
-                submit_new_user = st.form_submit_button("💾 Simpan Pengguna")
+            with st.container(border=True):
+                with st.form("add_user_form"):
+                    new_username = st.text_input("👤 Username Baru")
+                    new_password = st.text_input("🔑 Password Baru", type="password")
+                    new_role = st.selectbox("🛡️ Hak Akses", ["user", "admin"])
+                    submit_new_user = st.form_submit_button("💾 Simpan Pengguna", use_container_width=True)
 
-                if submit_new_user:
-                    if new_username and new_password:
-                        try:
-                            hashed_pw = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
-                            conn = sqlite3.connect(DB_NAME)
-                            c = conn.cursor()
-                            c.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", 
-                                      (new_username, hashed_pw, new_role))
-                            conn.commit()
-                            conn.close()
-                            st.success(f"✅ Pengguna baru **{new_username}** berhasil ditambahkan!")
-                            st.rerun()
-                        except sqlite3.IntegrityError:
-                            st.error("⚠️ Username sudah terdaftar!")
-                    else:
-                        st.warning("⚠️ Username dan Password tidak boleh kosong!")
-
-
-    # ----------------------------------------------------
-    # MENU: KELOLA JADWAL (ADMIN ONLY)
-    # ----------------------------------------------------
-    elif choice == "📅 Kelola Jadwal (Admin)":
-        st.title("📅 Kelola Jadwal Monitoring")
-        st.markdown("Tambahkan jadwal cabor yang harus dimonitoring oleh petugas.")
-        
-        cabor_list = [
-            "ANGGAR (IKASI)", "ATLETIK (PASI)", "ANGKAT BESI (PABSI)", "BOLA BASKET (PERBASI)", 
-            "BOLA VOLI (PBVSI)", "BULU TANGKIS (PBSI)", "CATUR (PERCASI)", "E. SPORT",
-            "KARATE (FORKI)", "PENCAK SILAT (IPSI)", "RENANG (PRSI)", "SEPAK BOLA (Askab-PSSI)", 
-            "TAEKWONDO (TI)", "TENIS MEJA (PTMSI)", "TINJU (PERTINA)", "WUSHU (WI)"
-            # Anda bisa menambahkan cabor lainnya ke dalam list ini
-        ]
-        
-        col_form, col_data = st.columns([1, 2])
-        
-        with col_form:
-            st.subheader("➕ Tambah Jadwal Baru")
-            with st.form("form_jadwal"):
-                new_cabor = st.selectbox("Cabang Olahraga", cabor_list)
-                new_tanggal = st.date_input("Tanggal Kegiatan", datetime.date.today())
-                new_tempat = st.text_input("Tempat / Lokasi")
-                submit_jadwal = st.form_submit_button("Simpan Jadwal", use_container_width=True)
-                
-                if submit_jadwal:
-                    if new_tempat:
-                        conn = sqlite3.connect(DB_NAME)
-                        c = conn.cursor()
-                        c.execute("INSERT INTO schedules (cabor, tanggal, tempat) VALUES (?, ?, ?)", 
-                                  (new_cabor, str(new_tanggal), new_tempat))
-                        conn.commit()
-                        conn.close()
-                        st.success("✅ Jadwal berhasil ditambahkan!")
-                        st.rerun()
-                    else:
-                        st.warning("⚠️ Tempat tidak boleh kosong!")
-                        
-        with col_data:
-            st.subheader("📋 Daftar Jadwal Aktif")
-            conn = sqlite3.connect(DB_NAME)
-            jadwal_df = pd.read_sql_query("SELECT id, cabor as Cabor, tanggal as Tanggal, tempat as Tempat FROM schedules", conn)
-            conn.close()
-            
-            if jadwal_df.empty:
-                st.info("Belum ada jadwal yang dibuat.")
-            else:
-                st.dataframe(jadwal_df, use_container_width=True, hide_index=True)
-                
-                with st.expander("🗑️ Hapus Jadwal"):
-                    del_id = st.selectbox("Pilih ID Jadwal yang akan dihapus", jadwal_df['id'].tolist())
-                    if st.button("Hapus Jadwal Terpilih"):
-                        conn = sqlite3.connect(DB_NAME)
-                        c = conn.cursor()
-                        c.execute("DELETE FROM schedules WHERE id=?", (del_id,))
-                        conn.commit()
-                        conn.close()
-                        st.success("Jadwal berhasil dihapus!")
-                        st.rerun()
-
-
-    # ----------------------------------------------------
-    # MENU: FORM LAPORAN (UNTUK USER & ADMIN)
-    # ----------------------------------------------------
-    elif choice == "📝 Ambil Jadwal & Isi Form":
-        st.title("📝 Form Laporan Monitoring")
-        
-        # Mengambil data jadwal dari Database
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        c.execute("SELECT id, cabor, tanggal, tempat FROM schedules")
-        schedules_data = c.fetchall()
-        conn.close()
-
-        if not schedules_data:
-            st.warning("⚠️ Belum ada jadwal monitoring yang tersedia. Harap hubungi Admin untuk membuat jadwal.")
-        else:
-            st.info("1️⃣ Pilih Jadwal yang tersedia di bawah ini, lalu isi daftar petugas dan catatan evaluasi.")
-            
-            # Format tampilan dropdown jadwal
-            schedule_options = {}
-            for s in schedules_data:
-                label = f"{s[1]} | {s[2]} | {s[3]}"
-                schedule_options[label] = s # Menyimpan raw data berdasarkan label
-
-            selected_label = st.selectbox("Pilih Jadwal Monitoring", list(schedule_options.keys()))
-            selected_schedule = schedule_options[selected_label]
-            
-            # Ekstrak data jadwal yang dipilih
-            val_cabor = selected_schedule[1]
-            val_tanggal = selected_schedule[2]
-            val_tempat = selected_schedule[3]
-
-            with st.form("form_laporan"):
-                st.markdown("### 📋 Detail Petugas & Evaluasi")
-                
-                # Petugas menggunakan text_area agar bisa diisi banyak nama (1 per baris)
-                petugas_text = st.text_area("👤 Daftar Petugas (Tulis 1 nama per baris)", 
-                                           placeholder="Contoh:\nBudi Santoso\nAndi Saputra\nSiti Aminah", 
-                                           help="Tulis satu nama per baris. Aplikasi otomatis akan menambahkan penomoran (1, 2, 3) di dokumen Word.")
-                
-                catatan = st.text_area("✍️ Catatan Evaluasi & Hasil Monitoring", height=150)
-                
-                st.markdown("### 📸 Upload Foto (Minimal 2, Maksimal 5)")
-                fotos = st.file_uploader("Upload Foto Dokumentasi", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
-
-                submit_laporan = st.form_submit_button("📄 Buat Laporan (Generate Word)", use_container_width=True)
-
-            # --- VALIDASI & GENERATE LAPORAN ---
-            if submit_laporan:
-                if not petugas_text.strip():
-                    st.warning("⚠️ Harap isi minimal 1 nama petugas!")
-                elif not catatan.strip():
-                    st.warning("⚠️ Catatan evaluasi tidak boleh kosong!")
-                elif len(fotos) < 2:
-                    st.error("🚨 Jumlah foto kurang! Harap unggah minimal 2 foto dokumentasi.")
-                elif len(fotos) > 5:
-                    st.error("🚨 Terlalu banyak foto! Batas maksimal adalah 5 foto.")
-                else:
-                    with st.spinner("⏳ Sedang menyusun dokumen Word..."):
-                        word_file = generate_word_report(petugas_text, val_cabor, val_tanggal, val_tempat, catatan, fotos)
-                        
-                        st.success("🎉 Laporan berhasil dibuat! Silakan klik tombol di bawah untuk mengunduh.")
-                        
-                        st.download_button(
-                            label="📥 Download Laporan Word (.docx)",
-                            data=word_file,
-                            file_name=f"Laporan_Monev_{val_cabor.split(' ')[0]}_{val_tanggal}.docx",
-                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                            type="primary"
-                        )
+                    if submit_new_user:
+                        if new_username and new_password:
+                            try:
+                                hashed_pw = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
+                                conn = sqlite3.connect(DB_NAME)
+                                c = conn.cursor()
+                                c.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", 
+                                          (new_username, hashed_pw, new_role))
+                                conn.commit()
+                                conn.close()
+                                st.success(f"✅ Pengguna baru **{new_username}** berhasil ditambahkan!")
+                                st.rerun()
+                            except sqlite3.IntegrityError:
+                                st.error("⚠️ Username sudah terdaftar!")
+                        else:
+                            st.warning("⚠️ Username dan Password tidak boleh kosong!")
