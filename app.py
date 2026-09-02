@@ -273,12 +273,24 @@ else:
         st.markdown(f"**Waktu Saat Ini:** {get_current_time_id()}")
         st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
         
-        # 1. Daftar Cabor Bawaan (Default)
+        # 1. Daftar Cabor Bawaan (Berdasarkan Gambar)
         base_cabor = [
-            "ANGGAR (IKASI)", "ATLETIK (PASI)", "ANGKAT BESI (PABSI)", "BOLA BASKET (PERBASI)", 
-            "BOLA VOLI (PBVSI)", "BULU TANGKIS (PBSI)", "CATUR (PERCASI)", "E. SPORT",
-            "KARATE (FORKI)", "PENCAK SILAT (IPSI)", "RENANG (PRSI)", "SEPAK BOLA (Askab-PSSI)", 
-            "TAEKWONDO (TI)", "TENIS MEJA (PTMSI)", "TINJU (PERTINA)", "WUSHU (WI)"
+            "ANGGAR (IKASI)", "AERO SPORT (FASI)", "ARUNG JERAM (FAJI)", "ATLETIK (PASI)", 
+            "ANGKAT BESI (PABSI)", "ANGKAT BERAT (PABERSI)", "BINARAGA FITNESS (PBFI)", 
+            "BILIAR (POBSI)", "BALAP SEPEDA (ISSI)", "BOLA BASKET (PERBASI)", 
+            "BOLA SUNDUL (PERBOSI)", "BOLA VOLI (PBVSI)", "BOWLING (PBI)", "BRIDGE (GABSI)", 
+            "BULU TANGKIS (PBSI)", "BASEBALL & SOFTBALL (PERBASASI)", "BOLA TANGAN (ABTI)", 
+            "CATUR (PERCASI)", "CRICKET (PCI)", "DAYUNG (PODSI)", "DRUM BAND (PDBI)", 
+            "GOLF (PGI)", "GULAT (PGSI)", "GATEBALL (PERGATSI)", "HOCKEY (FHI)", "JUDO (PJSI)", 
+            "KEMPO (PERKEMI)", "KARATE (FORKI)", "LAYAR (PORLASI)", "MENEMBAK (PERBAKIN)", 
+            "MUAY THAI (MI)", "MOTOR (IMI)", "PANAHAN (PERPANI)", "PANJAT TEBING (FPTI)", 
+            "PENCAK SILAT (IPSI)", "PETANQUE (POPI)", "RENANG (PRSI)", "RUGBY (PRUI)", 
+            "SENAM (PERSANI)", "SEPAK BOLA (Askab-PSSI)", "SEPAK TAKRAW (PSTI)", 
+            "SEPATU RODA (PORSEROSI)", "SQUASH (PSI)", "TAEKWONDO (TI)", "TARUNG DERAJAT (KODRAT)", 
+            "TENIS LAPANGAN (PELTI)", "TENIS MEJA (PTMSI)", "TINJU (PERTINA)", "WUSHU (WI)", 
+            "WOODBALL (IWBA)", "KICKBOXING (KBI)", "E. SPORT", "FLOOR BALL", "MMA", "SELAM", 
+            "BARONGSAI (FOBI)", "JUJITSU (PBJI)", "KURASH", "PICKLE BALL", "BAPOPSI", 
+            "PERWOSI", "SIWO"
         ]
         
         # 2. Ambil Cabor tambahan yang sudah pernah dibuat di database (agar dinamis)
@@ -288,7 +300,8 @@ else:
         existing_cabors = [row[0] for row in c.fetchall()]
         conn.close()
         
-        # 3. Gabungkan dan hilangkan duplikat, lalu urutkan abjad, dan tambahkan opsi "Lainnya" di akhir
+        # 3. Gabungkan dan hilangkan duplikat, lalu urutkan, dan tambahkan opsi "Lainnya" di akhir
+        # Note: Set digunakan untuk menghilangkan duplikat antara base_cabor dan existing_cabors
         combined_cabor = sorted(list(set(base_cabor + existing_cabors)))
         combined_cabor.append("➕ LAINNYA (Tambah Baru)")
         
