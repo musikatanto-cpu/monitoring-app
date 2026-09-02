@@ -41,6 +41,18 @@ def init_db():
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT, role TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS schedules (id INTEGER PRIMARY KEY AUTOINCREMENT, cabor TEXT, tanggal TEXT, tempat TEXT)''')
+    
+    # Tambahan: Tabel untuk menyimpan file Laporan
+    c.execute('''CREATE TABLE IF NOT EXISTS reports (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                    cabor TEXT, 
+                    tanggal_kegiatan TEXT, 
+                    submit_time DATETIME, 
+                    file_name TEXT, 
+                    file_data BLOB)''')
+
+    # Fitur Hapus Otomatis: Hapus laporan yang lebih dari 30 hari
+    c.execute("DELETE FROM reports WHERE submit_time < datetime('now', '-30 days')")
 
     # Buat akun admin default jika belum ada
     c.execute("SELECT * FROM users WHERE username='admin'")
@@ -95,14 +107,13 @@ def generate_word_report(petugas_text, cabor, tanggal, tempat, catatan, fotos):
     doc.add_heading('\nCatatan Evaluasi / Hasil Monitoring:', level=3)
     doc.add_paragraph(catatan)
 
-    # DOKUMENTASI (Pindah ke halaman baru agar rapi di 1 halaman)
+    # DOKUMENTASI
     if fotos:
         doc.add_page_break()
         head_doc = doc.add_heading('Lampiran Foto Dokumentasi', level=2)
         head_doc.alignment = WD_ALIGN_PARAGRAPH.CENTER
         doc.add_paragraph(f"Cabor: {cabor} | Tanggal: {tanggal}\n")
         
-        # Buat tabel 2 kolom agar muat banyak foto di 1 lembar
         table = doc.add_table(rows=0, cols=2)
         table.autofit = False 
         
@@ -174,7 +185,7 @@ else:
     
     # Menu Navigasi Berdasarkan Role
     if st.session_state['role'] == 'admin':
-        menu = ["📅 Kelola Jadwal (Admin)", "👥 Kelola User (Admin)", "📝 Coba Isi Laporan"]
+        menu = ["📅 Kelola Jadwal (Admin)", "👥 Kelola User (Admin)", "📂 Arsip Laporan (Admin)", "📝 Coba Isi Laporan"]
         choice = st.sidebar.radio("📌 Navigasi Admin:", menu)
     else:
         choice = "📝 Isi Form Laporan"
@@ -214,14 +225,14 @@ else:
                 st.markdown("#### 📋 2. Detail Evaluasi & Dokumentasi")
                 
                 petugas_text = st.text_area("👤 Daftar Petugas (Tulis 1 nama per baris)", 
-                                           placeholder="Contoh:\nBudi Santoso\nAndi Saputra", height=100)
+                                            placeholder="Contoh:\nBudi Santoso\nAndi Saputra", height=100)
                 
                 catatan = st.text_area("✍️ Catatan Evaluasi / Hasil Monitoring", height=150)
                 
                 st.markdown("**📸 Upload Foto Bukti (Bebas 2 s/d 5 Foto)**")
                 fotos = st.file_uploader("Otomatis digabung jadi 1 halaman rapi di Word.", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
 
-                submit_laporan = st.button("📄 Generate Dokumen Laporan", use_container_width=True, type="primary")
+                submit_laporan = st.button("📄 Generate & Simpan Laporan", use_container_width=True, type="primary")
 
             if submit_laporan:
                 if not petugas_text.strip():
@@ -233,39 +244,104 @@ else:
                 elif len(fotos) > 5:
                     st.error("🚨 Maksimal 5 foto dokumentasi agar muat 1 halaman.")
                 else:
-                    with st.spinner("⏳ Menyusun dokumen laporan..."):
+                    with st.spinner("⏳ Menyusun dokumen laporan & menyimpan ke server..."):
                         word_file = generate_word_report(petugas_text, val_cabor, val_tanggal, val_tempat, catatan, fotos)
                         
-                        # Membersihkan string nama file dari karakter ilegal
                         safe_date_name = val_tanggal.replace(" s/d ", "_").replace("-", "").replace("/", "")
                         file_name_doc = f"Monev_{val_cabor.split()[0]}_{safe_date_name}.docx"
+                        
+                        # Simpan ke Database
+                        file_bytes = word_file.getvalue()
+                        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        
+                        conn = sqlite3.connect(DB_NAME)
+                        c = conn.cursor()
+                        c.execute("INSERT INTO reports (cabor, tanggal_kegiatan, submit_time, file_name, file_data) VALUES (?, ?, ?, ?, ?)",
+                                  (val_cabor, val_tanggal, now_str, file_name_doc, file_bytes))
+                        conn.commit()
+                        conn.close()
                         
                         st.session_state['report_generated'] = True
                         st.session_state['word_file'] = word_file
                         st.session_state['file_name_doc'] = file_name_doc
                         
+                        # Update pesan WA (hanya memberitahu admin untuk cek aplikasi)
                         wa_number = "6285691860578"
-                        pesan = f"Halo Admin, berikut adalah Laporan Monitoring *{val_cabor}*.\nTanggal: {val_tanggal}\nTempat: {val_tempat}\n\nLaporan telah saya unduh, berikut adalah file lampirannya."
+                        pesan = f"Halo Admin, Laporan Monitoring *{val_cabor}* (Tanggal Kegiatan: {val_tanggal}) telah selesai dibuat dan berhasil masuk ke sistem.\n\nSilakan login ke aplikasi dan buka menu *Arsip Laporan* untuk mengunduh dokumen."
                         wa_link = f"https://wa.me/{wa_number}?text={urllib.parse.quote(pesan)}"
                         st.session_state['wa_link'] = wa_link
             
             if st.session_state.get('report_generated', False):
-                st.success("🎉 **Laporan Selesai! Ikuti 2 langkah di bawah ini:**")
+                st.success("🎉 **Laporan Berhasil Disimpan di Sistem!** (Berlaku 30 Hari)")
                 colA, colB = st.columns(2)
                 
                 with colA:
                     st.download_button(
-                        label="📥 1. Unduh Laporan Word (.docx)",
+                        label="📥 Unduh Salinan untuk Anda",
                         data=st.session_state['word_file'],
                         file_name=st.session_state['file_name_doc'],
                         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                         use_container_width=True
                     )
                 with colB:
-                    st.link_button("📲 2. Kirim Laporan via WhatsApp Admin", 
+                    st.link_button("📲 Kirim Notifikasi via WhatsApp ke Admin", 
                                    st.session_state['wa_link'], 
                                    use_container_width=True)
-                    st.caption("*(Pastikan Anda melampirkan/attach file yang baru saja diunduh saat jendela WhatsApp terbuka)*")
+                    st.caption("*(Kirim pesan teks ini agar Admin tahu laporan sudah siap diunduh)*")
+
+    # ----------------------------------------------------
+    # MENU ADMIN: ARSIP LAPORAN (BARU)
+    # ----------------------------------------------------
+    elif choice == "📂 Arsip Laporan (Admin)":
+        st.markdown(f"### 📂 Arsip Laporan Tersimpan")
+        st.markdown("⚠️ *Laporan yang berusia lebih dari 30 hari akan otomatis terhapus oleh sistem.*")
+        st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
+
+        conn = sqlite3.connect(DB_NAME)
+        # Ambil metadata laporan saja (tanpa file_data agar tidak berat diload ke dataframe)
+        reports_df = pd.read_sql_query("SELECT id as ID, cabor as Cabor, tanggal_kegiatan as 'Tgl Kegiatan', submit_time as 'Waktu Submit', file_name as 'Nama File' FROM reports ORDER BY submit_time DESC", conn)
+        
+        if reports_df.empty:
+            st.info("Belum ada laporan yang di-submit dan tersimpan di sistem saat ini.")
+            conn.close()
+        else:
+            st.dataframe(reports_df, use_container_width=True, hide_index=True)
+            
+            col_dl, col_del = st.columns(2)
+            
+            with col_dl:
+                with st.container(border=True):
+                    st.markdown("#### 📥 Unduh Laporan")
+                    dl_id = st.selectbox("Pilih ID Laporan yang ingin diunduh:", reports_df['ID'].tolist())
+                    
+                    if dl_id:
+                        c = conn.cursor()
+                        c.execute("SELECT file_name, file_data FROM reports WHERE id=?", (dl_id,))
+                        row = c.fetchone()
+                        
+                        if row:
+                            file_name, file_data = row
+                            st.download_button(
+                                label=f"Unduh '{file_name}'",
+                                data=file_data,
+                                file_name=file_name,
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                use_container_width=True,
+                                type="primary"
+                            )
+            
+            with col_del:
+                with st.container(border=True):
+                    st.markdown("#### 🗑️ Hapus Laporan Manual")
+                    del_id = st.selectbox("Pilih ID Laporan yang ingin dihapus secara paksa:", reports_df['ID'].tolist())
+                    
+                    if st.button("Hapus File Ini", use_container_width=True):
+                        c = conn.cursor()
+                        c.execute("DELETE FROM reports WHERE id=?", (del_id,))
+                        conn.commit()
+                        st.success(f"✅ Laporan dengan ID {del_id} berhasil dihapus dari sistem!")
+                        st.rerun()
+            conn.close()
 
     # ----------------------------------------------------
     # MENU ADMIN: KELOLA JADWAL
@@ -318,7 +394,6 @@ else:
                     else:
                         custom_cabor = "" 
                         
-                    # MENGGUNAKAN TUPLE AGAR MENDUKUNG RENTANG TANGGAL
                     new_tanggal = st.date_input(
                         "Tanggal Kegiatan (Bisa pilih satu hari atau rentang hari)", 
                         value=(datetime.date.today(), datetime.date.today())
@@ -331,14 +406,11 @@ else:
                     if submit_jadwal:
                         final_cabor = custom_cabor.strip().upper() if selected_cabor_option == "➕ LAINNYA (Tambah Baru)" else selected_cabor_option
                         
-                        # LOGIKA PEMROSESAN RENTANG TANGGAL
                         if isinstance(new_tanggal, tuple):
                             if len(new_tanggal) == 2:
                                 if new_tanggal[0] == new_tanggal[1]:
-                                    # Jika hanya klik 1 tanggal
                                     final_tanggal = new_tanggal[0].strftime("%d-%m-%Y")
                                 else:
-                                    # Jika klik tanggal awal dan akhir
                                     final_tanggal = f"{new_tanggal[0].strftime('%d-%m-%Y')} s/d {new_tanggal[1].strftime('%d-%m-%Y')}"
                             elif len(new_tanggal) == 1:
                                 final_tanggal = new_tanggal[0].strftime("%d-%m-%Y")
