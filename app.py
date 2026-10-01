@@ -447,9 +447,11 @@ def kelola_user():
 
     st.markdown("### ✏️ Edit / Nonaktifkan User")
     conn = get_conn()
-    users = conn.execute(
-        "SELECT id, username, nama_lengkap, role, aktif FROM users ORDER BY username"
-    ).fetchall()
+    users = [
+        dict(r) for r in conn.execute(
+            "SELECT id, username, nama_lengkap, role, aktif FROM users ORDER BY username"
+        ).fetchall()
+    ]
     conn.close()
 
     if users:
@@ -556,9 +558,11 @@ def kelola_cabor():
 
     st.markdown("### ✏️ Edit / Nonaktifkan Cabor")
     conn = get_conn()
-    rows = conn.execute(
-        "SELECT * FROM cabor ORDER BY nama"
-    ).fetchall()
+    rows = [
+        dict(r) for r in conn.execute(
+            "SELECT * FROM cabor ORDER BY nama"
+        ).fetchall()
+    ]
     conn.close()
 
     if rows:
