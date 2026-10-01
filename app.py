@@ -13,6 +13,8 @@ Fitur:
 - Laporan Saya (petugas): lihat status, detail, download Word
 - Hapus laporan (admin)
 - Manajemen user & cabor
+- Download Word oleh user + arsip otomatis ke Google Drive
+- Sinkronisasi ulang file Word ke Google Drive setelah tindak lanjut admin
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import datetime
 import sqlite3
 import hashlib
 import uuid
+import re
 from io import BytesIO
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
@@ -30,6 +33,11 @@ import pandas as pd
 from docx import Document
 from docx.shared import Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+# Google Drive API
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 
 # ============================================================
 # KONFIGURASI
@@ -44,6 +52,14 @@ st.set_page_config(
 DB_NAME = "monitoring.db"
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
+
+# ============================================================
+# GOOGLE DRIVE
+# ============================================================
+# Folder tujuan arsip otomatis laporan Word.
+GOOGLE_DRIVE_FOLDER_ID = "1AfjLphuOSf2ekqxCSv9OzU6x_B1qEvGf"
+GOOGLE_DRIVE_SCOPE = ["https://www.googleapis.com/auth/drive"]
+WORD_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 DEFAULT_STATUS = "Belum Ditindaklanjuti"
 STATUS_OPTIONS = [
@@ -271,6 +287,10 @@ def init_db() -> None:
         "catatan_admin": "TEXT DEFAULT ''",
         "updated_at": "TEXT DEFAULT CURRENT_TIMESTAMP",
         "created_at": "TEXT DEFAULT CURRENT_TIMESTAMP",
+        "drive_file_id": "TEXT DEFAULT ''",
+        "drive_url": "TEXT DEFAULT ''",
+        "drive_status": "TEXT DEFAULT 'Belum diunggah'",
+        "drive_uploaded_at": "TEXT DEFAULT ''",
     }.items():
         _add_column_if_missing(cur, "laporan_monitoring", col, defn)
 
@@ -447,7 +467,8 @@ def fetch_laporan_list(
     sql = f"""
         SELECT id, tanggal, cabor, lokasi, petugas,
                COALESCE(status, '{DEFAULT_STATUS}') AS status,
-               updated_at
+               COALESCE(drive_status, 'Belum diunggah') AS drive_status,
+               drive_url, updated_at
         FROM laporan_monitoring
         {where}
         ORDER BY tanggal DESC, id DESC
@@ -549,6 +570,126 @@ def status_badge_html(status: str) -> str:
     else:
         cls = "badge-belum"
     return f'<span class="{cls}">{s}</span>'
+
+
+# ============================================================
+# GOOGLE DRIVE HELPERS
+# ============================================================
+def drive_is_configured() -> bool:
+    """Cek apakah kredensial Google Drive tersedia di Streamlit Secrets."""
+    try:
+        return "gcp_service_account" in st.secrets
+    except Exception:
+        return False
+
+
+@st.cache_resource(show_spinner=False)
+def get_drive_service():
+    """Buat koneksi Google Drive menggunakan service account dari st.secrets."""
+    if not drive_is_configured():
+        return None
+    info = dict(st.secrets["gcp_service_account"])
+    credentials = service_account.Credentials.from_service_account_info(
+        info,
+        scopes=GOOGLE_DRIVE_SCOPE,
+    )
+    return build("drive", "v3", credentials=credentials, cache_discovery=False)
+
+
+def safe_drive_filename(value: str) -> str:
+    value = str(value or "").strip()
+    value = re.sub(r'[\\/:*?"<>|]+', "-", value)
+    value = re.sub(r"\s+", " ", value)
+    return value[:180] or "Laporan_Monitoring"
+
+
+def get_drive_report_name(row: sqlite3.Row) -> str:
+    return safe_drive_filename(
+        f"Laporan_Monev_BINPRES_ID-{row['id']}_{row['cabor']}_{row['tanggal']}.docx"
+    )
+
+
+def upload_or_update_drive_report(laporan_id: int) -> Tuple[bool, str, str]:
+    """Generate Word terbaru lalu upload/update ke folder Google Drive."""
+    row = get_laporan_by_id(int(laporan_id))
+    if not row:
+        return False, "Laporan tidak ditemukan.", ""
+
+    if not drive_is_configured():
+        return False, "Google Drive belum dikonfigurasi di Streamlit Secrets.", ""
+
+    service = get_drive_service()
+    if service is None:
+        return False, "Koneksi Google Drive tidak tersedia.", ""
+
+    try:
+        word_bytes = generate_word_report([dict(row)], is_all=False, include_photos=True)
+        filename = get_drive_report_name(row)
+        media = MediaIoBaseUpload(
+            BytesIO(word_bytes),
+            mimetype=WORD_MIME,
+            resumable=True,
+        )
+
+        existing_id = (row["drive_file_id"] or "").strip()
+        if existing_id:
+            try:
+                result = service.files().update(
+                    fileId=existing_id,
+                    body={"name": filename},
+                    media_body=media,
+                    fields="id,webViewLink,name",
+                ).execute()
+                file_id = result["id"]
+            except Exception:
+                # Jika file lama sudah dihapus/dipindahkan dan ID tidak valid,
+                # buat arsip baru agar laporan tetap tersimpan.
+                existing_id = ""
+
+        if not existing_id:
+            metadata = {
+                "name": filename,
+                "parents": [GOOGLE_DRIVE_FOLDER_ID],
+                "mimeType": WORD_MIME,
+                "description": (
+                    f"Laporan Monitoring BINPRES KONI Kabupaten Tangerang | "
+                    f"ID {row['id']} | Cabor {row['cabor']} | Tanggal {row['tanggal']}"
+                ),
+            }
+            result = service.files().create(
+                body=metadata,
+                media_body=media,
+                fields="id,webViewLink,name",
+            ).execute()
+            file_id = result["id"]
+
+        url = result.get("webViewLink") or f"https://drive.google.com/file/d/{file_id}/view"
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with get_conn() as conn:
+            conn.execute(
+                """UPDATE laporan_monitoring
+                   SET drive_file_id=?, drive_url=?, drive_status=?, drive_uploaded_at=?
+                   WHERE id=?""",
+                (file_id, url, "Tersimpan di Google Drive", now, int(laporan_id)),
+            )
+            conn.commit()
+        return True, "Laporan berhasil diarsipkan ke Google Drive.", url
+
+    except Exception as exc:
+        message = str(exc)
+        with get_conn() as conn:
+            conn.execute(
+                """UPDATE laporan_monitoring
+                   SET drive_status=?
+                   WHERE id=?""",
+                (f"Gagal: {message[:180]}", int(laporan_id)),
+            )
+            conn.commit()
+        return False, f"Upload Google Drive gagal: {message}", ""
+
+
+def retry_drive_upload(laporan_id: int) -> Tuple[bool, str, str]:
+    return upload_or_update_drive_report(int(laporan_id))
 
 
 # ============================================================
@@ -784,6 +925,9 @@ def generate_excel_report(df: pd.DataFrame) -> bytes:
         "medis_nonteknis": "Medis - Nonteknis",
         "updated_at": "Diperbarui",
         "created_at": "Dibuat",
+        "drive_status": "Status Google Drive",
+        "drive_url": "Link Google Drive",
+        "drive_uploaded_at": "Waktu Upload Drive",
     }
     detail = detail.rename(
         columns={k: v for k, v in rename_map.items() if k in detail.columns}
@@ -1194,14 +1338,19 @@ def halaman_laporan_admin() -> None:
     with st.expander("📋 Lihat Detail Lengkap", expanded=False):
         render_detail_laporan(row)
 
-    col_w, col_x, col_d = st.columns(3)
+    if row["drive_url"]:
+        st.success(f"☁️ Arsip Drive: {row['drive_status']} — [Buka file di Google Drive]({row['drive_url']})")
+    else:
+        st.warning(f"☁️ Arsip Drive: {row['drive_status'] or 'Belum diunggah'}")
+
+    col_w, col_x, col_g, col_d = st.columns(4)
     with col_w:
         word_file = generate_word_report([dict(row)], is_all=False)
         st.download_button(
             "⬇️ Word Satuan",
             data=word_file,
             file_name=f"Laporan_{row['cabor']}_{row['tanggal']}.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            mime=WORD_MIME,
             use_container_width=True,
         )
     with col_x:
@@ -1213,6 +1362,17 @@ def halaman_laporan_admin() -> None:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
+    with col_g:
+        if row["drive_url"]:
+            st.link_button("☁️ Buka di Google Drive", row["drive_url"], use_container_width=True)
+        else:
+            if st.button("☁️ Upload ke Drive", use_container_width=True):
+                ok, msg, url = retry_drive_upload(int(pilihan_id))
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
     with col_d:
         if st.button("🗑️ Hapus Laporan", use_container_width=True):
             st.session_state["confirm_delete_id"] = int(pilihan_id)
@@ -1276,7 +1436,11 @@ def halaman_laporan_admin() -> None:
                     (status, catatan, int(pilihan_id)),
                 )
                 conn.commit()
-            st.success("Tindak lanjut berhasil diperbarui.")
+            ok_drive, msg_drive, _ = upload_or_update_drive_report(int(pilihan_id))
+            if ok_drive:
+                st.success("Tindak lanjut berhasil diperbarui dan Word di Google Drive sudah diperbarui.")
+            else:
+                st.warning(f"Tindak lanjut tersimpan, tetapi sinkronisasi Drive belum berhasil: {msg_drive}")
             st.rerun()
 
 
@@ -1494,15 +1658,28 @@ def form_input_monitoring() -> None:
                 )
                 n_foto = save_uploaded_photos(laporan_id, files_to_save)
 
+                # Otomatis buat Word dan arsipkan ke Google Drive.
+                ok_drive, msg_drive, drive_url = upload_or_update_drive_report(int(laporan_id))
+
                 msg = f"✅ Laporan berhasil disimpan (ID: {laporan_id})."
                 if n_foto:
                     msg += f" **{n_foto} foto** ikut tersimpan dan akan muncul di file Word."
                 else:
                     msg += " (tanpa foto)"
                 st.success(msg)
+
+                if ok_drive:
+                    st.success("☁️ Laporan Word otomatis tersimpan di Google Drive.")
+                    st.link_button("☁️ Buka Arsip di Google Drive", drive_url, use_container_width=True)
+                else:
+                    st.warning(
+                        "Laporan tetap tersimpan di sistem, tetapi arsip Google Drive gagal. "
+                        f"{msg_drive}"
+                    )
+
                 st.info(
                     "Admin dapat melihat dan menindaklanjuti laporan Anda. "
-                    "Cek tab **Laporan Saya** untuk mengunduh Word."
+                    "Cek tab **Laporan Saya** untuk melihat status, membuka arsip Drive, atau mengunduh Word."
                 )
 
 
@@ -1564,12 +1741,36 @@ def halaman_laporan_saya() -> None:
     with st.expander("📋 Lihat Detail Lengkap", expanded=True):
         render_detail_laporan(row)
 
+    st.markdown("### ☁️ Arsip Google Drive")
+    if row["drive_url"]:
+        st.success(f"{row['drive_status']} — diarsipkan {row['drive_uploaded_at'] or '-'}")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.link_button("☁️ Buka File di Google Drive", row["drive_url"], use_container_width=True)
+        with c2:
+            if st.button("🔄 Sinkronkan Ulang ke Drive", use_container_width=True, key=f"retry_drive_{row['id']}"):
+                ok, msg, _ = retry_drive_upload(int(row["id"]))
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+    else:
+        st.warning(f"Belum tersimpan di Google Drive: {row['drive_status'] or 'Belum diunggah'}")
+        if st.button("☁️ Coba Simpan ke Google Drive", use_container_width=True, key=f"upload_drive_{row['id']}"):
+            ok, msg, _ = retry_drive_upload(int(row["id"]))
+            if ok:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
+
     word_file = generate_word_report([dict(row)], is_all=False)
     st.download_button(
         label="⬇️ Download Laporan Word (termasuk foto)",
         data=word_file,
         file_name=f"Laporan_{row['cabor']}_{row['tanggal']}.docx",
-        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        mime=WORD_MIME,
         use_container_width=True,
         type="primary",
     )
