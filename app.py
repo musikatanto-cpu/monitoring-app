@@ -28,7 +28,7 @@ from typing import Optional, List, Dict, Any, Tuple
 
 import pandas as pd
 from docx import Document
-from docx.shared import Inches
+from docx.shared import Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 # ============================================================
@@ -554,80 +554,184 @@ def status_badge_html(status: str) -> str:
 # ============================================================
 # WORD & EXCEL EXPORT
 # ============================================================
+def _set_run_font(run, size_pt: float = 10, bold: bool = False) -> None:
+    run.font.size = Pt(size_pt)
+    run.bold = bold
+    run.font.name = "Calibri"
+
+
+def _add_compact_para(doc, text: str, bold: bool = False, size: float = 10, space_after: float = 2) -> None:
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(0)
+    p.paragraph_format.space_after = Pt(space_after)
+    p.paragraph_format.line_spacing = 1.0
+    run = p.add_run(text)
+    _set_run_font(run, size_pt=size, bold=bold)
+
+
 def generate_word_report(
     data_list: List[Dict[str, Any]],
     is_all: bool = False,
     include_photos: bool = True,
 ) -> bytes:
+    """
+    Layout hemat kertas:
+    - Margin kecil, font 10pt, spasi rapat
+    - Lembar isi laporan dulu
+    - Lembar foto terpisah (halaman baru) di akhir tiap laporan
+    - 1 file Word
+    """
     doc = Document()
     section = doc.sections[0]
-    section.top_margin = Inches(0.7)
-    section.bottom_margin = Inches(0.7)
-    section.left_margin = Inches(0.8)
-    section.right_margin = Inches(0.8)
+    # Margin rapat (hemat kertas)
+    section.top_margin = Inches(0.5)
+    section.bottom_margin = Inches(0.5)
+    section.left_margin = Inches(0.6)
+    section.right_margin = Inches(0.6)
 
-    judul = "REKAPITULASI SEMUA LAPORAN MONEV BINPRES" if is_all else "LAPORAN MONEV BINPRES"
-    title = doc.add_heading(judul, 0)
+    # Style default body
+    style = doc.styles["Normal"]
+    style.font.name = "Calibri"
+    style.font.size = Pt(10)
+    style.paragraph_format.space_before = Pt(0)
+    style.paragraph_format.space_after = Pt(2)
+    style.paragraph_format.line_spacing = 1.0
+
+    judul = "REKAPITULASI LAPORAN MONEV BINPRES" if is_all else "LAPORAN MONEV BINPRES"
+    title = doc.add_heading(judul, level=1)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    doc.add_paragraph(
-        f"KONI Kabupaten Tangerang — Dicetak: {datetime.date.today().strftime('%d/%m/%Y')}"
-    )
-    doc.add_paragraph("")
+    for run in title.runs:
+        run.font.size = Pt(14)
+        run.font.name = "Calibri"
 
-    def add_section(title_text: str, items: List[Tuple[str, Any]]) -> None:
-        doc.add_heading(title_text, level=2)
+    meta = doc.add_paragraph()
+    meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    meta.paragraph_format.space_after = Pt(6)
+    r = meta.add_run(
+        f"KONI Kabupaten Tangerang  |  Dicetak: {datetime.date.today().strftime('%d/%m/%Y')}"
+    )
+    _set_run_font(r, size_pt=9)
+
+    def add_info_line(label: str, value: Any) -> None:
+        p = doc.add_paragraph()
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after = Pt(1)
+        p.paragraph_format.line_spacing = 1.0
+        r1 = p.add_run(f"{label}: ")
+        _set_run_font(r1, size_pt=10, bold=True)
+        r2 = p.add_run(str(value) if value else "-")
+        _set_run_font(r2, size_pt=10)
+
+    def add_section_compact(title_text: str, items: List[Tuple[str, Any]]) -> None:
+        # Judul section
+        h = doc.add_paragraph()
+        h.paragraph_format.space_before = Pt(6)
+        h.paragraph_format.space_after = Pt(2)
+        hr = h.add_run(title_text)
+        _set_run_font(hr, size_pt=11, bold=True)
+
         for question, answer in items:
-            p = doc.add_paragraph()
-            p.add_run(f"{question}:").bold = True
-            doc.add_paragraph(str(answer) if answer else "-")
+            # Pertanyaan + jawaban dalam 1 blok rapat
+            pq = doc.add_paragraph()
+            pq.paragraph_format.space_before = Pt(2)
+            pq.paragraph_format.space_after = Pt(0)
+            pq.paragraph_format.line_spacing = 1.0
+            rq = pq.add_run(f"• {question}")
+            _set_run_font(rq, size_pt=9, bold=True)
+
+            pa = doc.add_paragraph()
+            pa.paragraph_format.space_before = Pt(0)
+            pa.paragraph_format.space_after = Pt(2)
+            pa.paragraph_format.line_spacing = 1.0
+            pa.paragraph_format.left_indent = Inches(0.15)
+            ra = pa.add_run(str(answer).strip() if answer and str(answer).strip() else "—")
+            _set_run_font(ra, size_pt=9)
+
+    # Kumpulkan foto per laporan untuk halaman terpisah
+    photos_queue: List[Tuple[Dict[str, Any], list]] = []
 
     for idx, data in enumerate(data_list):
-        if is_all:
-            doc.add_heading(
-                f"Laporan {idx + 1}: {data.get('cabor', '-')} — {data.get('tanggal', '-')}",
-                level=1,
-            )
+        if is_all and idx > 0:
+            doc.add_page_break()
 
-        doc.add_paragraph(f"Cabang Olahraga\t: {data.get('cabor', '-')}")
-        doc.add_paragraph(f"Tanggal\t\t: {data.get('tanggal', '-')}")
-        doc.add_paragraph(f"Lokasi\t\t: {data.get('lokasi', '-')}")
-        doc.add_paragraph(f"Petugas Monev\t: {data.get('petugas', '-')}")
-        doc.add_paragraph(f"Status\t\t: {data.get('status', '-')}")
-        doc.add_paragraph("-" * 70)
+        if is_all:
+            h = doc.add_paragraph()
+            h.paragraph_format.space_before = Pt(4)
+            h.paragraph_format.space_after = Pt(4)
+            hr = h.add_run(
+                f"Laporan {idx + 1}: {data.get('cabor', '-')} — {data.get('tanggal', '-')}"
+            )
+            _set_run_font(hr, size_pt=12, bold=True)
+
+        # --- Lembar isi (rapat) ---
+        add_info_line("Cabang Olahraga", data.get("cabor"))
+        add_info_line("Tanggal", data.get("tanggal"))
+        add_info_line("Lokasi", data.get("lokasi"))
+        add_info_line("Petugas Monev", data.get("petugas"))
+        add_info_line("Status", data.get("status") or DEFAULT_STATUS)
+
+        # Garis pemisah tipis
+        sep = doc.add_paragraph()
+        sep.paragraph_format.space_before = Pt(2)
+        sep.paragraph_format.space_after = Pt(2)
+        sr = sep.add_run("─" * 55)
+        _set_run_font(sr, size_pt=8)
 
         for section_title, fields in FIELD_LABELS.items():
             items = [(label, data.get(key)) for key, label in fields]
-            add_section(section_title, items)
+            add_section_compact(section_title, items)
 
         if data.get("catatan_admin"):
-            add_section("Catatan Admin / Tindak Lanjut", [
+            add_section_compact("Catatan Admin / Tindak Lanjut", [
                 ("Catatan", data["catatan_admin"]),
             ])
 
+        # Simpan foto untuk halaman terpisah
         if include_photos and data.get("id"):
             fotos = get_fotos_by_laporan(int(data["id"]))
             if fotos:
-                doc.add_heading("Dokumentasi Foto", level=2)
-                for foto in fotos:
-                    img_bytes = get_foto_bytes(foto)
-                    if img_bytes:
-                        try:
-                            doc.add_picture(BytesIO(img_bytes), width=Inches(4.5))
-                            cap = doc.add_paragraph(
-                                foto["original_name"] or foto["filename"]
-                            )
-                            cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        except Exception:
-                            doc.add_paragraph(
-                                f"[Gagal memuat: {foto['original_name']}]"
-                            )
-                    else:
-                        doc.add_paragraph(
-                            f"[Foto tidak tersedia: {foto['original_name']}]"
-                        )
+                photos_queue.append((data, fotos))
 
-        if idx < len(data_list) - 1:
+    # --- Lembar foto terpisah (di akhir, tetap 1 file) ---
+    if include_photos and photos_queue:
+        for data, fotos in photos_queue:
             doc.add_page_break()
+
+            h = doc.add_paragraph()
+            h.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            h.paragraph_format.space_after = Pt(4)
+            hr = h.add_run("DOKUMENTASI FOTO")
+            _set_run_font(hr, size_pt=12, bold=True)
+
+            sub = doc.add_paragraph()
+            sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            sub.paragraph_format.space_after = Pt(8)
+            sr = sub.add_run(
+                f"{data.get('cabor', '-')}  |  {data.get('tanggal', '-')}  |  "
+                f"{data.get('lokasi', '-')}  |  Petugas: {data.get('petugas', '-')}"
+            )
+            _set_run_font(sr, size_pt=9)
+
+            for foto in fotos:
+                img_bytes = get_foto_bytes(foto)
+                if img_bytes:
+                    try:
+                        # Lebar sedang agar hemat ruang, bisa 2 foto per halaman
+                        doc.add_picture(BytesIO(img_bytes), width=Inches(5.2))
+                        cap = doc.add_paragraph()
+                        cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        cap.paragraph_format.space_before = Pt(2)
+                        cap.paragraph_format.space_after = Pt(8)
+                        cr = cap.add_run(foto["original_name"] or foto["filename"])
+                        _set_run_font(cr, size_pt=8)
+                    except Exception:
+                        _add_compact_para(
+                            doc, f"[Gagal memuat: {foto['original_name']}]", size=9
+                        )
+                else:
+                    _add_compact_para(
+                        doc, f"[Foto tidak tersedia: {foto['original_name']}]", size=9
+                    )
 
     buf = BytesIO()
     doc.save(buf)
