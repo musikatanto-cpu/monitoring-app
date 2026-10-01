@@ -1,52 +1,199 @@
+"""
+Sistem Monitoring BINPRES — Versi Lengkap
+KONI Kabupaten Tangerang
+
+Fitur:
+- Login admin / petugas + ganti password
+- Form input monitoring (5 section) + upload multi-foto
+- Foto disimpan BLOB di database (aman di Streamlit Cloud)
+- Dashboard admin + grafik statistik
+- Filter laporan (cabor, status, tanggal, keyword)
+- Detail laporan + preview foto
+- Export Word (satuan & rekap, foto ikut) + Export Excel
+- Laporan Saya (petugas): lihat status, detail, download Word
+- Hapus laporan (admin)
+- Manajemen user & cabor
+"""
+
+from __future__ import annotations
+
 import streamlit as st
 import datetime
 import sqlite3
-import pandas as pd
 import hashlib
+import uuid
 from io import BytesIO
-from PIL import Image, ImageDraw, ImageFont
+from pathlib import Path
+from typing import Optional, List, Dict, Any, Tuple
+
+import pandas as pd
 from docx import Document
-from docx.shared import Pt, Inches, RGBColor
+from docx.shared import Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
-from docx.oxml import OxmlElement, parse_xml
-from docx.oxml.ns import nsdecls, qn
 
 # ============================================================
-# KONFIGURASI APLIKASI
+# KONFIGURASI
 # ============================================================
 st.set_page_config(
-    page_title="Sistem Monitoring Binpres",
+    page_title="Sistem Monitoring BINPRES",
     page_icon="🏆",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
 DB_NAME = "monitoring.db"
+UPLOAD_DIR = Path("uploads")
+UPLOAD_DIR.mkdir(exist_ok=True)
+
+DEFAULT_STATUS = "Belum Ditindaklanjuti"
+STATUS_OPTIONS = [
+    "Belum Ditindaklanjuti",
+    "Sedang Ditindaklanjuti",
+    "Selesai",
+]
+
+DEFAULT_CABOR = [
+    "ANGGAR", "ANGKAT BERAT", "ANGKAT BESI", "AQUATIC/RENANG", "ARUNG JERAM",
+    "ATLETIK", "BALAP SEPEDA", "BARONGSAI", "BERMOTOR", "BILLIARD", "BINARAGA",
+    "BOLA BASKET", "BOLA TANGAN", "BOLA VOLI", "BOWLING", "BRIDGE", "BULUTANGKIS",
+    "CATUR", "DAYUNG", "DRUMBAND", "E-SPORT", "FLOOR BALL", "FUTSAL", "GATEBALL",
+    "GOLF", "GULAT", "GYMNASTIC/SENAM", "HOKI", "IBCA MMA", "JU JITSU", "JUDO",
+    "KARATE", "KEMPO", "MENEMBAK", "MUAYTHAI", "PANAHAN", "PANJAT TEBING",
+    "PENCAK SILAT", "PETANQUE", "PICKLEBALL", "RUGBY", "SAMBO", "SELAM",
+    "SEPAK BOLA", "SEPAK TAKRAW", "SEPATU RODA", "SOFTBALL", "SQUASH",
+    "TAEKWONDO", "TARUNG DERAJAT", "TENIS LAPANG", "TENIS MEJA", "TINJU",
+    "WOODBALL", "WUSHU",
+]
+
+FIELD_LABELS: Dict[str, List[Tuple[str, str]]] = {
+    "1. Performa Fisik & Kebugaran": [
+        ("fisik_parameter", "Capaian parameter fisik (vs benchmark target)"),
+        ("fisik_peaking", "Grafik performa puncak (peaking)"),
+        ("fisik_recovery", "Tingkat pemulihan fisik (recovery)"),
+        ("fisik_cedera", "Keluhan cedera lama / indikasi cedera baru"),
+    ],
+    "2. Kesiapan Taktis & Strategi": [
+        ("taktis_lawan", "Pemetaan kekuatan calon lawan"),
+        ("taktis_instruksi", "Kemampuan mengikuti instruksi teknis"),
+        ("taktis_ujicoba", "Hasil try-out / sparing"),
+    ],
+    "3. Mental, Psikologis & Kesiapan Mental": [
+        ("mental_cemas", "Tingkat kecemasan & pengendalian stres"),
+        ("mental_fokus", "Fokus, motivasi, dan self-confidence"),
+        ("mental_rutinitas", "Rutinitas mental khusus"),
+        ("mental_psikolog", "Koordinasi dengan psikolog olahraga"),
+    ],
+    "4. Nutrisi, Berat Badan & Gaya Hidup": [
+        ("nutrisi_bb", "Progres penyesuaian berat badan"),
+        ("nutrisi_asupan", "Asupan nutrisi dan suplemen"),
+        ("nutrisi_hidrasi", "Status hidrasi"),
+        ("nutrisi_tidur", "Kualitas dan kecukupan tidur"),
+    ],
+    "5. Medis, Bebas Doping & Logistik": [
+        ("medis_rekam", "Status rekam medis & tim medis"),
+        ("medis_doping", "Keamanan obat / suplemen (bebas doping)"),
+        ("medis_alat", "Kesiapan perlengkapan tanding"),
+        ("medis_nonteknis", "Kendala non-teknis"),
+    ],
+}
+
+CUSTOM_CSS = """
+<style>
+    .main-header {
+        background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
+        color: white;
+        padding: 1.2rem 1.5rem;
+        border-radius: 12px;
+        margin-bottom: 1.5rem;
+        box-shadow: 0 4px 12px rgba(30, 58, 138, 0.25);
+    }
+    .main-header h1 { margin: 0; font-size: 1.6rem; font-weight: 700; }
+    .main-header p { margin: 0.3rem 0 0 0; opacity: 0.9; font-size: 0.95rem; }
+
+    div[data-testid="stMetric"] {
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 10px;
+        padding: 0.8rem 1rem;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    }
+    div[data-testid="stMetric"] label { color: #64748b !important; font-size: 0.85rem !important; }
+    div[data-testid="stMetric"] [data-testid="stMetricValue"] { color: #1e3a8a !important; font-weight: 700; }
+
+    .section-badge {
+        display: inline-block;
+        background: #1e3a8a;
+        color: white;
+        padding: 0.35rem 0.9rem;
+        border-radius: 6px;
+        font-weight: 600;
+        font-size: 0.95rem;
+        margin-bottom: 0.8rem;
+    }
+
+    .badge-belum { background:#fef3c7; color:#92400e; padding:3px 10px; border-radius:12px; font-size:0.8rem; font-weight:600; }
+    .badge-sedang { background:#dbeafe; color:#1e40af; padding:3px 10px; border-radius:12px; font-size:0.8rem; font-weight:600; }
+    .badge-selesai { background:#d1fae5; color:#065f46; padding:3px 10px; border-radius:12px; font-size:0.8rem; font-weight:600; }
+
+    section[data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%);
+    }
+    section[data-testid="stSidebar"] * { color: #e2e8f0 !important; }
+    section[data-testid="stSidebar"] .stButton > button {
+        background: #334155; border: 1px solid #475569; color: white;
+    }
+    section[data-testid="stSidebar"] .stButton > button:hover {
+        background: #475569; border-color: #64748b;
+    }
+
+    .stButton > button[kind="primary"],
+    div[data-testid="stFormSubmitButton"] > button {
+        background: linear-gradient(135deg, #dc2626 0%, #ef4444 100%) !important;
+        border: none !important;
+        font-weight: 600 !important;
+        border-radius: 8px !important;
+    }
+
+    div[data-testid="stExpander"] {
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        margin-bottom: 0.5rem;
+    }
+
+    #MainMenu { visibility: hidden; }
+    footer { visibility: hidden; }
+</style>
+"""
 
 
 # ============================================================
 # DATABASE
 # ============================================================
-def get_conn():
-    conn = sqlite3.connect(DB_NAME)
+def get_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
 
-def hash_password(password):
+def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
-def verify_password(password, password_hash):
-    return hash_password(password) == password_hash
+def verify_password(password: str, stored: str) -> bool:
+    return hash_password(password) == stored or password == stored
 
 
-def init_db():
+def _add_column_if_missing(cursor: sqlite3.Cursor, table: str, column: str, definition: str) -> None:
+    existing = [r["name"] for r in cursor.execute(f"PRAGMA table_info({table})").fetchall()]
+    if column not in existing:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def init_db() -> None:
     conn = get_conn()
-    cursor = conn.cursor()
+    cur = conn.cursor()
 
-    cursor.execute("""
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
@@ -58,7 +205,7 @@ def init_db():
         )
     """)
 
-    cursor.execute("""
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS cabor (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nama TEXT UNIQUE NOT NULL,
@@ -66,7 +213,7 @@ def init_db():
         )
     """)
 
-    cursor.execute("""
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS laporan_monitoring (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             tanggal DATE,
@@ -94,526 +241,954 @@ def init_db():
             medis_nonteknis TEXT,
             status TEXT DEFAULT 'Belum Ditindaklanjuti',
             catatan_admin TEXT DEFAULT '',
-            foto_data BLOB,
-            koordinat_gps TEXT DEFAULT '',
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
 
-    # Migrasi database jika ada kolom baru
-    existing_reports = [r["name"] for r in cursor.execute("PRAGMA table_info(laporan_monitoring)").fetchall()]
-    report_columns = {
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS laporan_foto (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            laporan_id INTEGER NOT NULL,
+            filename TEXT NOT NULL,
+            original_name TEXT,
+            mime_type TEXT DEFAULT 'image/jpeg',
+            data BLOB,
+            uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (laporan_id) REFERENCES laporan_monitoring(id) ON DELETE CASCADE
+        )
+    """)
+
+    for col, defn in {
+        "nama_lengkap": "TEXT DEFAULT ''",
+        "aktif": "INTEGER DEFAULT 1",
+        "created_at": "TEXT DEFAULT CURRENT_TIMESTAMP",
+    }.items():
+        _add_column_if_missing(cur, "users", col, defn)
+
+    for col, defn in {
         "status": "TEXT DEFAULT 'Belum Ditindaklanjuti'",
         "catatan_admin": "TEXT DEFAULT ''",
-        "foto_data": "BLOB",
-        "koordinat_gps": "TEXT DEFAULT ''",
-        "updated_at": "TEXT DEFAULT CURRENT_TIMESTAMP"
-    }
-    for col, definition in report_columns.items():
-        if col not in existing_reports:
-            cursor.execute(f"ALTER TABLE laporan_monitoring ADD COLUMN {col} {definition}")
+        "updated_at": "TEXT DEFAULT CURRENT_TIMESTAMP",
+        "created_at": "TEXT DEFAULT CURRENT_TIMESTAMP",
+    }.items():
+        _add_column_if_missing(cur, "laporan_monitoring", col, defn)
 
-    # Account default
-    count = cursor.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+    for col, defn in {
+        "mime_type": "TEXT DEFAULT 'image/jpeg'",
+        "data": "BLOB",
+    }.items():
+        _add_column_if_missing(cur, "laporan_foto", col, defn)
+
+    count = cur.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
     if count == 0:
-        cursor.execute(
-            "INSERT INTO users (username, password, role, nama_lengkap, aktif) VALUES (?, ?, ?, ?, 1)",
-            ("admin", hash_password("admin123"), "admin", "Administrator")
+        cur.executemany(
+            """INSERT INTO users (username, password, role, nama_lengkap, aktif)
+               VALUES (?, ?, ?, ?, 1)""",
+            [
+                ("admin", hash_password("admin123"), "admin", "Administrator"),
+                ("petugas", hash_password("petugas123"), "user", "Petugas Monitoring"),
+            ],
         )
-        cursor.execute(
-            "INSERT INTO users (username, password, role, nama_lengkap, aktif) VALUES (?, ?, ?, ?, 1)",
-            ("petugas", hash_password("petugas123"), "user", "Petugas Monitoring")
-        )
+    else:
+        for username, old_pw, role, nama in [
+            ("admin", "admin123", "admin", "Administrator"),
+            ("petugas", "petugas123", "user", "Petugas Monitoring"),
+        ]:
+            row = cur.execute(
+                "SELECT id, password FROM users WHERE username = ?", (username,)
+            ).fetchone()
+            if row and row["password"] == old_pw:
+                cur.execute(
+                    "UPDATE users SET password=?, role=?, nama_lengkap=? WHERE id=?",
+                    (hash_password(old_pw), role, nama, row["id"]),
+                )
 
-    default_cabor = [
-        'ANGGAR', 'ANGKAT BERAT', 'ANGKAT BESI', 'AQUATIC/RENANG', 'ARUNG JERAM',
-        'ATLETIK', 'BALAP SEPEDA', 'BARONGSAI', 'BERMOTOR', 'BILLIARD', 'BINARAGA',
-        'BOLA BASKET', 'BOLA TANGAN', 'BOLA VOLI', 'BOWLING', 'BRIDGE', 'BULUTANGKIS',
-        'CATUR', 'DAYUNG', 'DRUMBAND', 'E-SPORT', 'FLOOR BALL', 'FUTSAL', 'GATEBALL',
-        'GOLF', 'GULAT', 'GYMNASTIC/SENAM', 'HOKI', 'IBCA MMA', 'JU JITSU', 'JUDO',
-        'KARATE', 'KEMPO', 'MENEMBAK', 'MUAYTHAI', 'PANAHAN', 'PANJAT TEBING',
-        'PENCAK SILAT', 'PETANQUE', 'PICKLEBALL', 'RUGBY', 'SAMBO', 'SELAM',
-        'SEPAK BOLA', 'SEPAK TAKRAW', 'SEPATU RODA', 'SOFTBALL', 'SQUASH',
-        'TAEKWONDO', 'TARUNG DERAJAT', 'TENIS LAPANG', 'TENIS MEJA', 'TINJU',
-        'WOODBALL', 'WUSHU'
-    ]
-    if cursor.execute("SELECT COUNT(*) AS n FROM cabor").fetchone()["n"] == 0:
-        cursor.executemany("INSERT OR IGNORE INTO cabor (nama) VALUES (?)", [(x,) for x in default_cabor])
+    if cur.execute("SELECT COUNT(*) AS n FROM cabor").fetchone()["n"] == 0:
+        cur.executemany(
+            "INSERT OR IGNORE INTO cabor (nama) VALUES (?)",
+            [(n,) for n in DEFAULT_CABOR],
+        )
 
     conn.commit()
     conn.close()
 
 
 # ============================================================
-# HELPER WATERMARK FOTO (TIME MARK & REL LOKASI)
+# HELPER / QUERY
 # ============================================================
-def beri_watermark_foto(image_bytes, timestamp_str, lokasi_str, gps_str=""):
-    """Menambahkan timestamp dan lokasi real secara otomatis ke atas gambar"""
-    img = Image.open(BytesIO(image_bytes)).convert("RGB")
-    
-    # Orientasi & Ukuran
-    w, h = img.size
-    
-    # Buat overlay semi transparan di bagian bawah
-    overlay = Image.new("RGBA", img.size, (255, 255, 255, 0))
-    draw = ImageDraw.Draw(overlay)
-    
-    box_height = int(h * 0.14)
-    if box_height < 70:
-        box_height = 70
-        
-    # Rectangle hitam transparan di bawah foto
-    draw.rectangle([(0, h - box_height), (w, h)], fill=(0, 0, 0, 180))
-    
-    # Gabungkan overlay ke gambar utama
-    img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
-    draw = ImageDraw.Draw(img)
-    
-    # Tentukan teks watermark
-    teks_waktu = f"⏰ Waktu: {timestamp_str}"
-    teks_lokasi = f"📍 Lokasi: {lokasi_str}"
-    if gps_str:
-        teks_lokasi += f" ({gps_str})"
-    teks_watermark = f"{teks_waktu}\n{teks_lokasi}\n🛡️ VERIFIED MONEV BINPRES KONI KAB. TANGERANG"
-    
-    # Font size responsif
-    font_size = max(14, int(h * 0.022))
-    try:
-        font = ImageFont.truetype("arial.ttf", font_size)
-    except IOError:
-        font = ImageFont.load_default()
-        
-    # Cetak teks warna putih
-    padding_x = int(w * 0.03)
-    padding_y = h - box_height + 10
-    draw.text((padding_x, padding_y), teks_watermark, fill=(255, 255, 0), font=font)
-    
-    out_io = BytesIO()
-    img.save(out_io, format="JPEG", quality=92)
-    return out_io.getvalue()
-
-
-def logout():
+def logout() -> None:
     for key in list(st.session_state.keys()):
         del st.session_state[key]
     st.rerun()
 
 
-def get_cabor_list():
-    conn = get_conn()
-    rows = conn.execute("SELECT nama FROM cabor WHERE aktif=1 ORDER BY nama").fetchall()
-    conn.close()
+def get_cabor_list() -> List[str]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT nama FROM cabor WHERE aktif=1 ORDER BY nama"
+        ).fetchall()
     return [r["nama"] for r in rows]
 
 
-def get_current_user():
-    if "username" not in st.session_state:
+def get_current_user() -> Optional[sqlite3.Row]:
+    username = st.session_state.get("username")
+    if not username:
         return None
-    conn = get_conn()
-    row = conn.execute("SELECT * FROM users WHERE username=?", (st.session_state["username"],)).fetchone()
-    conn.close()
-    return row
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM users WHERE username=?", (username,)
+        ).fetchone()
+
+
+def fetch_all_users() -> pd.DataFrame:
+    with get_conn() as conn:
+        return pd.read_sql_query(
+            """SELECT id, username, nama_lengkap, role,
+                      CASE WHEN aktif=1 THEN 'Aktif' ELSE 'Nonaktif' END AS status,
+                      created_at
+               FROM users ORDER BY id DESC""",
+            conn,
+        )
+
+
+def fetch_all_cabor() -> pd.DataFrame:
+    with get_conn() as conn:
+        return pd.read_sql_query(
+            """SELECT id, nama,
+                      CASE WHEN aktif=1 THEN 'Aktif' ELSE 'Nonaktif' END AS status
+               FROM cabor ORDER BY nama""",
+            conn,
+        )
+
+
+def fetch_laporan_summary() -> Dict[str, int]:
+    with get_conn() as conn:
+        total = conn.execute("SELECT COUNT(*) AS n FROM laporan_monitoring").fetchone()["n"]
+        bulan_ini = conn.execute(
+            """SELECT COUNT(*) AS n FROM laporan_monitoring
+               WHERE strftime('%Y-%m', tanggal)=strftime('%Y-%m','now')"""
+        ).fetchone()["n"]
+        cabor_termonitor = conn.execute(
+            "SELECT COUNT(DISTINCT cabor) AS n FROM laporan_monitoring"
+        ).fetchone()["n"]
+        perlu_tindak = conn.execute(
+            """SELECT COUNT(*) AS n FROM laporan_monitoring
+               WHERE status=? OR status IS NULL""",
+            (DEFAULT_STATUS,),
+        ).fetchone()["n"]
+        selesai = conn.execute(
+            "SELECT COUNT(*) AS n FROM laporan_monitoring WHERE status='Selesai'"
+        ).fetchone()["n"]
+    return {
+        "total": total,
+        "bulan_ini": bulan_ini,
+        "cabor_termonitor": cabor_termonitor,
+        "perlu_tindak": perlu_tindak,
+        "selesai": selesai,
+    }
+
+
+def fetch_chart_data():
+    with get_conn() as conn:
+        by_cabor = pd.read_sql_query(
+            """SELECT cabor, COUNT(*) AS jumlah
+               FROM laporan_monitoring
+               GROUP BY cabor ORDER BY jumlah DESC LIMIT 15""",
+            conn,
+        )
+        by_month = pd.read_sql_query(
+            """SELECT strftime('%Y-%m', tanggal) AS bulan, COUNT(*) AS jumlah
+               FROM laporan_monitoring
+               WHERE tanggal IS NOT NULL
+               GROUP BY bulan ORDER BY bulan""",
+            conn,
+        )
+        by_status = pd.read_sql_query(
+            """SELECT COALESCE(status, 'Belum Ditindaklanjuti') AS status, COUNT(*) AS jumlah
+               FROM laporan_monitoring GROUP BY status""",
+            conn,
+        )
+    return by_cabor, by_month, by_status
+
+
+def fetch_laporan_list(
+    petugas: Optional[str] = None,
+    cabor: Optional[str] = None,
+    status: Optional[str] = None,
+    tgl_awal: Optional[datetime.date] = None,
+    tgl_akhir: Optional[datetime.date] = None,
+    keyword: Optional[str] = None,
+) -> pd.DataFrame:
+    clauses = []
+    params: list = []
+
+    if petugas:
+        clauses.append("petugas = ?")
+        params.append(petugas)
+    if cabor and cabor != "Semua":
+        clauses.append("cabor = ?")
+        params.append(cabor)
+    if status and status != "Semua":
+        clauses.append("COALESCE(status, ?) = ?")
+        params.extend([DEFAULT_STATUS, status])
+    if tgl_awal:
+        clauses.append("tanggal >= ?")
+        params.append(str(tgl_awal))
+    if tgl_akhir:
+        clauses.append("tanggal <= ?")
+        params.append(str(tgl_akhir))
+    if keyword:
+        clauses.append("(lokasi LIKE ? OR petugas LIKE ? OR cabor LIKE ?)")
+        kw = f"%{keyword}%"
+        params.extend([kw, kw, kw])
+
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    sql = f"""
+        SELECT id, tanggal, cabor, lokasi, petugas,
+               COALESCE(status, '{DEFAULT_STATUS}') AS status,
+               updated_at
+        FROM laporan_monitoring
+        {where}
+        ORDER BY tanggal DESC, id DESC
+    """
+    with get_conn() as conn:
+        return pd.read_sql_query(sql, conn, params=params)
+
+
+def get_laporan_by_id(laporan_id: int) -> Optional[sqlite3.Row]:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM laporan_monitoring WHERE id=?", (laporan_id,)
+        ).fetchone()
+
+
+def get_fotos_by_laporan(laporan_id: int) -> List[sqlite3.Row]:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM laporan_foto WHERE laporan_id=? ORDER BY id",
+            (laporan_id,),
+        ).fetchall()
+
+
+def _mime_from_ext(ext: str) -> str:
+    return {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+    }.get(ext.lower(), "image/jpeg")
+
+
+def get_foto_bytes(foto: sqlite3.Row) -> Optional[bytes]:
+    """Prioritaskan BLOB di DB, fallback ke file disk."""
+    try:
+        blob = foto["data"]
+        if blob:
+            return bytes(blob)
+    except (IndexError, KeyError):
+        pass
+    path = UPLOAD_DIR / foto["filename"]
+    if path.exists():
+        return path.read_bytes()
+    return None
+
+
+def save_uploaded_photos(laporan_id: int, uploaded_files: list) -> int:
+    """Simpan foto ke disk + BLOB di database."""
+    if not uploaded_files:
+        return 0
+    count = 0
+    with get_conn() as conn:
+        for f in uploaded_files:
+            ext = Path(f.name).suffix.lower()
+            if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
+                continue
+            raw = f.getbuffer().tobytes()
+            if not raw:
+                continue
+            unique_name = f"{laporan_id}_{uuid.uuid4().hex[:10]}{ext}"
+            try:
+                dest = UPLOAD_DIR / unique_name
+                with open(dest, "wb") as out:
+                    out.write(raw)
+            except OSError:
+                pass
+            conn.execute(
+                """INSERT INTO laporan_foto
+                   (laporan_id, filename, original_name, mime_type, data)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (laporan_id, unique_name, f.name, _mime_from_ext(ext), raw),
+            )
+            count += 1
+        conn.commit()
+    return count
+
+
+def delete_laporan(laporan_id: int) -> None:
+    fotos = get_fotos_by_laporan(laporan_id)
+    for f in fotos:
+        path = UPLOAD_DIR / f["filename"]
+        if path.exists():
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    with get_conn() as conn:
+        conn.execute("DELETE FROM laporan_foto WHERE laporan_id=?", (laporan_id,))
+        conn.execute("DELETE FROM laporan_monitoring WHERE id=?", (laporan_id,))
+        conn.commit()
+
+
+def status_badge_html(status: str) -> str:
+    s = status or DEFAULT_STATUS
+    if s == "Selesai":
+        cls = "badge-selesai"
+    elif s == "Sedang Ditindaklanjuti":
+        cls = "badge-sedang"
+    else:
+        cls = "badge-belum"
+    return f'<span class="{cls}">{s}</span>'
 
 
 # ============================================================
-# GENERATE WORD REPORT (RAPI, KORPORAT & PROFESIONAL)
+# WORD & EXCEL EXPORT
 # ============================================================
-def set_cell_background(cell, fill_hex):
-    tcPr = cell._element.get_or_add_tcPr()
-    shd = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{fill_hex}"/>')
-    tcPr.append(shd)
-
-def generate_word_report(data_list, is_all=False):
+def generate_word_report(
+    data_list: List[Dict[str, Any]],
+    is_all: bool = False,
+    include_photos: bool = True,
+) -> bytes:
     doc = Document()
-    
-    # Set Margin Standar Laporan
     section = doc.sections[0]
-    section.top_margin = Inches(0.8)
-    section.bottom_margin = Inches(0.8)
+    section.top_margin = Inches(0.7)
+    section.bottom_margin = Inches(0.7)
     section.left_margin = Inches(0.8)
     section.right_margin = Inches(0.8)
 
-    PRIMARY_COLOR = RGBColor(0, 51, 102) # Navy Blue
-    
+    judul = "REKAPITULASI SEMUA LAPORAN MONEV BINPRES" if is_all else "LAPORAN MONEV BINPRES"
+    title = doc.add_heading(judul, 0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    doc.add_paragraph(
+        f"KONI Kabupaten Tangerang — Dicetak: {datetime.date.today().strftime('%d/%m/%Y')}"
+    )
+    doc.add_paragraph("")
+
+    def add_section(title_text: str, items: List[Tuple[str, Any]]) -> None:
+        doc.add_heading(title_text, level=2)
+        for question, answer in items:
+            p = doc.add_paragraph()
+            p.add_run(f"{question}:").bold = True
+            doc.add_paragraph(str(answer) if answer else "-")
+
     for idx, data in enumerate(data_list):
-        # Header Laporan
-        title_p = doc.add_paragraph()
-        title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        run_title = title_p.add_run("LAPORAN MONITORING & EVALUASI (MONEV)\nBIDANG PEMBINAAN DAN PRESTASI")
-        run_title.font.name = 'Arial'
-        run_title.font.size = Pt(14)
-        run_title.font.bold = True
-        run_title.font.color.rgb = PRIMARY_COLOR
-        
-        sub_title = doc.add_paragraph()
-        sub_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        run_sub = sub_title.add_run("KONI KABUPATEN TANGERANG")
-        run_sub.font.name = 'Arial'
-        run_sub.font.size = Pt(12)
-        run_sub.font.bold = True
-        
-        doc.add_paragraph().paragraph_format.space_after = Pt(6)
+        if is_all:
+            doc.add_heading(
+                f"Laporan {idx + 1}: {data.get('cabor', '-')} — {data.get('tanggal', '-')}",
+                level=1,
+            )
 
-        # Tabel Informasi Utama
-        table_info = doc.add_table(rows=5, cols=2)
-        table_info.alignment = WD_TABLE_ALIGNMENT.CENTER
-        table_info.autofit = False
-        
-        info_items = [
-            ("Cabang Olahraga", data.get("cabor", "-")),
-            ("Tanggal Monitoring", str(data.get("tanggal", "-"))),
-            ("Lokasi Latihan / Event", data.get("lokasi", "-")),
-            ("Petugas Monev", data.get("petugas", "-")),
-            ("Status Tindak Lanjut", data.get("status", "Belum Ditindaklanjuti"))
-        ]
-        
-        for row_idx, (label, val) in enumerate(info_items):
-            cell_lbl = table_info.cell(row_idx, 0)
-            cell_val = table_info.cell(row_idx, 1)
-            
-            cell_lbl.width = Inches(2.2)
-            cell_val.width = Inches(4.6)
-            
-            p0 = cell_lbl.paragraphs[0]
-            r0 = p0.add_run(label)
-            r0.bold = True
-            r0.font.size = Pt(10)
-            
-            p1 = cell_val.paragraphs[0]
-            r1 = p1.add_run(val)
-            r1.font.size = Pt(10)
-            
-            set_cell_background(cell_lbl, "F2F4F7")
+        doc.add_paragraph(f"Cabang Olahraga\t: {data.get('cabor', '-')}")
+        doc.add_paragraph(f"Tanggal\t\t: {data.get('tanggal', '-')}")
+        doc.add_paragraph(f"Lokasi\t\t: {data.get('lokasi', '-')}")
+        doc.add_paragraph(f"Petugas Monev\t: {data.get('petugas', '-')}")
+        doc.add_paragraph(f"Status\t\t: {data.get('status', '-')}")
+        doc.add_paragraph("-" * 70)
 
-        doc.add_paragraph().paragraph_format.space_after = Pt(12)
+        for section_title, fields in FIELD_LABELS.items():
+            items = [(label, data.get(key)) for key, label in fields]
+            add_section(section_title, items)
 
-        # Fungsi Helper Tambah Seksi Indikator
-        def add_section_table(section_title, items):
-            h_p = doc.add_paragraph()
-            h_run = h_p.add_run(section_title)
-            h_run.font.name = 'Arial'
-            h_run.font.size = Pt(11)
-            h_run.font.bold = True
-            h_run.font.color.rgb = PRIMARY_COLOR
-            h_p.paragraph_format.space_before = Pt(8)
-            h_p.paragraph_format.space_after = Pt(4)
-
-            t = doc.add_table(rows=len(items) + 1, cols=2)
-            t.alignment = WD_TABLE_ALIGNMENT.CENTER
-            
-            # Header Table
-            hdr_cells = t.rows[0].cells
-            hdr_cells[0].width = Inches(2.8)
-            hdr_cells[1].width = Inches(4.0)
-            
-            hdr_cells[0].paragraphs[0].add_run("Indikator Evaluasi").bold = True
-            hdr_cells[1].paragraphs[0].add_run("Catatan / Temuan Lapangan").bold = True
-            
-            set_cell_background(hdr_cells[0], "1F4E78")
-            set_cell_background(hdr_cells[1], "1F4E78")
-            hdr_cells[0].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
-            hdr_cells[1].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
-
-            for idx_i, (q_text, val_text) in enumerate(items):
-                row_cells = t.rows[idx_i + 1].cells
-                row_cells[0].width = Inches(2.8)
-                row_cells[1].width = Inches(4.0)
-                
-                p_q = row_cells[0].paragraphs[0]
-                rq = p_q.add_run(q_text)
-                rq.font.size = Pt(9.5)
-                
-                p_v = row_cells[1].paragraphs[0]
-                rv = p_v.add_run(val_text if val_text else "-")
-                rv.font.size = Pt(9.5)
-                
-                if idx_i % 2 == 1:
-                    set_cell_background(row_cells[0], "F9FAFB")
-                    set_cell_background(row_cells[1], "F9FAFB")
-            
-            doc.add_paragraph().paragraph_format.space_after = Pt(6)
-
-        # 1. Fisik
-        add_section_table("1. Performa Fisik & Kebugaran", [
-            ("Capaian Parameter Fisik vs Target", data.get("fisik_parameter")),
-            ("Grafik Performa Puncak (Peaking)", data.get("fisik_peaking")),
-            ("Tingkat Pemulihan (Recovery)", data.get("fisik_recovery")),
-            ("Keluhan / Indikasi Cedera", data.get("fisik_cedera"))
-        ])
-
-        # 2. Taktis
-        add_section_table("2. Kesiapan Taktis & Strategi", [
-            ("Pemetaan Kekuatan Lawan", data.get("taktis_lawan")),
-            ("Instruksi Teknis Bertekanan", data.get("taktis_instruksi")),
-            ("Hasil Try-out / Sparing", data.get("taktis_ujicoba"))
-        ])
-
-        # 3. Mental
-        add_section_table("3. Mental & Psikologis Atlet", [
-            ("Pengendalian Stres & Kecemasan", data.get("mental_cemas")),
-            ("Fokus, Motivasi & Self-Confidence", data.get("mental_fokus")),
-            ("Rutinitas Mental Khusus", data.get("mental_rutinitas")),
-            ("Koordinasi Psikolog Olahraga", data.get("mental_psikolog"))
-        ])
-
-        # 4. Nutrisi
-        add_section_table("4. Nutrisi, Berat Badan & Gaya Hidup", [
-            ("Progres Penyesuaian Berat Badan", data.get("nutrisi_bb")),
-            ("Asupan Nutrisi & Suplemen", data.get("nutrisi_asupan")),
-            ("Status Hidrasi Harian", data.get("nutrisi_hidrasi")),
-            ("Kualitas & Cukup Tidur", data.get("nutrisi_tidur"))
-        ])
-
-        # 5. Medis & Logistik
-        add_section_table("5. Medis, Bebas Doping & Logistik", [
-            ("Rekam Medis & Fisioterapis", data.get("medis_rekam")),
-            ("Keamanan Obat & Suplemen (Doping)", data.get("medis_doping")),
-            ("Kesiapan Alat / Kostum Tanding", data.get("medis_alat")),
-            ("Kendala Non-Teknis", data.get("medis_nonteknis"))
-        ])
-
-        # Catatan Admin jika ada
         if data.get("catatan_admin"):
-            add_section_table("Catatan & Tindak Lanjut Admin", [
-                ("Rekomendasi Admin BINPRES", data.get("catatan_admin"))
+            add_section("Catatan Admin / Tindak Lanjut", [
+                ("Catatan", data["catatan_admin"]),
             ])
 
-        # FOTO DOKUMENTASI TER-WATERMARK
-        if data.get("foto_data"):
+        if include_photos and data.get("id"):
+            fotos = get_fotos_by_laporan(int(data["id"]))
+            if fotos:
+                doc.add_heading("Dokumentasi Foto", level=2)
+                for foto in fotos:
+                    img_bytes = get_foto_bytes(foto)
+                    if img_bytes:
+                        try:
+                            doc.add_picture(BytesIO(img_bytes), width=Inches(4.5))
+                            cap = doc.add_paragraph(
+                                foto["original_name"] or foto["filename"]
+                            )
+                            cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        except Exception:
+                            doc.add_paragraph(
+                                f"[Gagal memuat: {foto['original_name']}]"
+                            )
+                    else:
+                        doc.add_paragraph(
+                            f"[Foto tidak tersedia: {foto['original_name']}]"
+                        )
+
+        if idx < len(data_list) - 1:
             doc.add_page_break()
-            f_title = doc.add_paragraph()
-            f_run = f_title.add_run("DOKUMENTASI FOTO MONITORING (TIME MARK & REL LOKASI)")
-            f_run.font.name = 'Arial'
-            f_run.font.size = Pt(11)
-            f_run.font.bold = True
-            f_run.font.color.rgb = PRIMARY_COLOR
-            f_title.paragraph_format.space_after = Pt(8)
 
-            img_stream = BytesIO(data["foto_data"])
-            doc.add_picture(img_stream, width=Inches(5.8))
-            
-            cap_p = doc.add_paragraph()
-            cap_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            c_run = cap_p.add_run(f"Gambar 1: Dokumentasi Lapangan Cabor {data.get('cabor')} - {data.get('tanggal')}")
-            c_run.font.size = Pt(8.5)
-            c_run.font.italic = True
-
-        if idx < len(data_list) - 1 and not data.get("foto_data"):
-            doc.add_page_break()
-
-    bio = BytesIO()
-    doc.save(bio)
-    return bio.getvalue()
+    buf = BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
 
 
-# ============================================================
-# LOGIN
-# ============================================================
-def halaman_login():
-    st.markdown(
-        """
-        <div style="text-align:center;padding:30px 0 15px 0">
-            <div style="font-size:52px">🏆</div>
-            <h1 style="margin-bottom:5px">Sistem Monitoring BINPRES</h1>
-            <p style="color:#777">KONI Kabupaten Tangerang</p>
-        </div>
-        """,
-        unsafe_allow_html=True
+def generate_excel_report(df: pd.DataFrame) -> bytes:
+    if df.empty:
+        out = BytesIO()
+        pd.DataFrame({"info": ["Tidak ada data"]}).to_excel(out, index=False)
+        return out.getvalue()
+
+    ids = df["id"].tolist()
+    placeholders = ",".join("?" * len(ids))
+    with get_conn() as conn:
+        detail = pd.read_sql_query(
+            f"""SELECT * FROM laporan_monitoring
+                WHERE id IN ({placeholders})
+                ORDER BY tanggal DESC, id DESC""",
+            conn,
+            params=ids,
+        )
+
+    rename_map = {
+        "id": "ID",
+        "tanggal": "Tanggal",
+        "cabor": "Cabang Olahraga",
+        "lokasi": "Lokasi",
+        "petugas": "Petugas",
+        "status": "Status",
+        "catatan_admin": "Catatan Admin",
+        "fisik_parameter": "Fisik - Parameter",
+        "fisik_peaking": "Fisik - Peaking",
+        "fisik_recovery": "Fisik - Recovery",
+        "fisik_cedera": "Fisik - Cedera",
+        "taktis_lawan": "Taktis - Lawan",
+        "taktis_instruksi": "Taktis - Instruksi",
+        "taktis_ujicoba": "Taktis - Ujicoba",
+        "mental_cemas": "Mental - Cemas",
+        "mental_fokus": "Mental - Fokus",
+        "mental_rutinitas": "Mental - Rutinitas",
+        "mental_psikolog": "Mental - Psikolog",
+        "nutrisi_bb": "Nutrisi - BB",
+        "nutrisi_asupan": "Nutrisi - Asupan",
+        "nutrisi_hidrasi": "Nutrisi - Hidrasi",
+        "nutrisi_tidur": "Nutrisi - Tidur",
+        "medis_rekam": "Medis - Rekam",
+        "medis_doping": "Medis - Doping",
+        "medis_alat": "Medis - Alat",
+        "medis_nonteknis": "Medis - Nonteknis",
+        "updated_at": "Diperbarui",
+        "created_at": "Dibuat",
+    }
+    detail = detail.rename(
+        columns={k: v for k, v in rename_map.items() if k in detail.columns}
     )
 
-    with st.form("login_form"):
-        username = st.text_input("👤 Username")
-        password = st.text_input("🔒 Password", type="password")
-        submit = st.form_submit_button("Masuk ke Sistem", use_container_width=True, type="primary")
-
-        if submit:
-            conn = get_conn()
-            user = conn.execute("SELECT * FROM users WHERE username=? AND aktif=1", (username.strip(),)).fetchone()
-            conn.close()
-
-            valid = False
-            if user:
-                valid = verify_password(password, user["password"]) or password == user["password"]
-
-            if valid:
-                st.session_state["logged_in"] = True
-                st.session_state["username"] = user["username"]
-                st.session_state["role"] = user["role"]
-                st.session_state["nama_lengkap"] = user["nama_lengkap"] or user["username"]
-                st.rerun()
-            else:
-                st.error("Username atau Password salah / akun tidak aktif.")
+    out = BytesIO()
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+        detail.to_excel(writer, sheet_name="Laporan Monitoring", index=False)
+    return out.getvalue()
 
 
-def sidebar_app():
+# ============================================================
+# UI COMPONENTS
+# ============================================================
+def render_sidebar() -> None:
     user = get_current_user()
     with st.sidebar:
         st.markdown("## 🏆 BINPRES")
         st.caption("Monitoring & Evaluasi Cabor")
         st.markdown("---")
-        st.write("👤 **" + (user["nama_lengkap"] if user else st.session_state.get("username", "")) + "**")
-        st.caption("Role: " + st.session_state.get("role", "").upper())
+        nama = (
+            user["nama_lengkap"]
+            if user and user["nama_lengkap"]
+            else st.session_state.get("username", "")
+        )
+        st.write(f"👤 **{nama}**")
+        st.caption(f"Role: {st.session_state.get('role', '').upper()}")
         st.markdown("---")
 
+        with st.expander("🔑 Ganti Password"):
+            with st.form("form_ganti_password"):
+                pw_lama = st.text_input("Password lama", type="password")
+                pw_baru = st.text_input("Password baru", type="password")
+                pw_konfirm = st.text_input("Konfirmasi password baru", type="password")
+                if st.form_submit_button("Simpan Password", use_container_width=True):
+                    if not pw_lama or not pw_baru:
+                        st.error("Semua field wajib diisi.")
+                    elif len(pw_baru) < 6:
+                        st.error("Password baru minimal 6 karakter.")
+                    elif pw_baru != pw_konfirm:
+                        st.error("Konfirmasi password tidak cocok.")
+                    else:
+                        u = get_current_user()
+                        if u and verify_password(pw_lama, u["password"]):
+                            with get_conn() as conn:
+                                conn.execute(
+                                    "UPDATE users SET password=? WHERE id=?",
+                                    (hash_password(pw_baru), u["id"]),
+                                )
+                                conn.commit()
+                            st.success("Password berhasil diubah.")
+                        else:
+                            st.error("Password lama salah.")
+
+        st.markdown("---")
         if st.button("🚪 Logout", use_container_width=True):
             logout()
 
 
-# ============================================================
-# DASHBOARD ADMIN & KELOLA
-# ============================================================
-def dashboard_admin():
-    conn = get_conn()
-    total = conn.execute("SELECT COUNT(*) AS n FROM laporan_monitoring").fetchone()["n"]
-    bulan_ini = conn.execute("SELECT COUNT(*) AS n FROM laporan_monitoring WHERE strftime('%Y-%m', tanggal)=strftime('%Y-%m','now')").fetchone()["n"]
-    cabor_termonitor = conn.execute("SELECT COUNT(DISTINCT cabor) AS n FROM laporan_monitoring").fetchone()["n"]
-    tindak = conn.execute("SELECT COUNT(*) AS n FROM laporan_monitoring WHERE status='Belum Ditindaklanjuti' OR status IS NULL").fetchone()["n"]
-    conn.close()
+def halaman_login() -> None:
+    st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+    st.markdown(
+        """
+        <div style="text-align:center;padding:40px 0 10px 0">
+            <div style="font-size:56px">🏆</div>
+            <h1 style="margin-bottom:4px;color:#1e3a8a">Sistem Monitoring BINPRES</h1>
+            <p style="color:#64748b;font-size:1.05rem">KONI Kabupaten Tangerang</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    st.markdown("## 📊 Dashboard Monitoring")
-    a, b, c, d = st.columns(4)
-    a.metric("Total Laporan", total)
-    b.metric("Laporan Bulan Ini", bulan_ini)
-    c.metric("Cabor Termonitor", cabor_termonitor)
-    d.metric("Perlu Tindak Lanjut", tindak)
+    _, col_c, _ = st.columns([1, 1.4, 1])
+    with col_c:
+        with st.form("login_form"):
+            st.markdown("#### Masuk ke Sistem")
+            username = st.text_input("👤 Username", placeholder="Masukkan username")
+            password = st.text_input(
+                "🔒 Password", type="password", placeholder="Masukkan password"
+            )
+            submit = st.form_submit_button(
+                "Masuk ke Sistem", use_container_width=True, type="primary"
+            )
+
+            if submit:
+                with get_conn() as conn:
+                    user = conn.execute(
+                        "SELECT * FROM users WHERE username=? AND aktif=1",
+                        (username.strip(),),
+                    ).fetchone()
+
+                if user and verify_password(password, user["password"]):
+                    st.session_state["logged_in"] = True
+                    st.session_state["username"] = user["username"]
+                    st.session_state["role"] = user["role"]
+                    st.session_state["nama_lengkap"] = (
+                        user["nama_lengkap"] or user["username"]
+                    )
+                    st.rerun()
+                else:
+                    st.error("Username atau Password salah / akun tidak aktif.")
+
+        st.caption("Data tersimpan pada database SQLite lokal • Versi lengkap")
+
+
+def render_detail_laporan(row: sqlite3.Row) -> None:
+    st.markdown(
+        f"**Cabor:** {row['cabor']} &nbsp;|&nbsp; "
+        f"**Tanggal:** {row['tanggal']} &nbsp;|&nbsp; "
+        f"**Lokasi:** {row['lokasi']} &nbsp;|&nbsp; "
+        f"**Petugas:** {row['petugas']}"
+    )
+    st.markdown(
+        f"**Status:** {status_badge_html(row['status'] or DEFAULT_STATUS)}",
+        unsafe_allow_html=True,
+    )
+    if row["catatan_admin"]:
+        st.info(f"**Catatan Admin:** {row['catatan_admin']}")
+
+    for section_title, fields in FIELD_LABELS.items():
+        with st.expander(section_title, expanded=False):
+            for key, label in fields:
+                val = row[key] if key in row.keys() else None
+                st.markdown(f"**{label}**")
+                st.write(val if val else "—")
+
+    fotos = get_fotos_by_laporan(int(row["id"]))
+    if fotos:
+        st.markdown("#### 🖼️ Dokumentasi Foto")
+        cols = st.columns(min(4, len(fotos)))
+        for i, foto in enumerate(fotos):
+            img_bytes = get_foto_bytes(foto)
+            if img_bytes:
+                with cols[i % len(cols)]:
+                    st.image(
+                        img_bytes,
+                        caption=foto["original_name"],
+                        use_container_width=True,
+                    )
+
+
+# ------------------------------------------------------------
+# DASHBOARD ADMIN
+# ------------------------------------------------------------
+def dashboard_admin() -> None:
+    stats = fetch_laporan_summary()
+
+    st.markdown(
+        """
+        <div class="main-header">
+            <h1>📊 Dashboard Monitoring BINPRES</h1>
+            <p>Ringkasan aktivitas monitoring & evaluasi cabang olahraga</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Total Laporan", stats["total"])
+    c2.metric("Bulan Ini", stats["bulan_ini"])
+    c3.metric("Cabor Termonitor", stats["cabor_termonitor"])
+    c4.metric("Perlu Tindak Lanjut", stats["perlu_tindak"])
+    c5.metric("Selesai", stats["selesai"])
+
+    st.markdown("---")
+
+    by_cabor, by_month, by_status = fetch_chart_data()
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown("##### 🏅 Top Cabor (jumlah laporan)")
+        if not by_cabor.empty:
+            st.bar_chart(by_cabor.set_index("cabor")["jumlah"], height=280)
+        else:
+            st.caption("Belum ada data.")
+
+    with col_b:
+        st.markdown("##### 📅 Tren Laporan per Bulan")
+        if not by_month.empty:
+            st.line_chart(by_month.set_index("bulan")["jumlah"], height=280)
+        else:
+            st.caption("Belum ada data.")
+
+    st.markdown("##### 📌 Distribusi Status")
+    if not by_status.empty:
+        st.bar_chart(by_status.set_index("status")["jumlah"], height=200)
+    else:
+        st.caption("Belum ada data.")
+
     st.markdown("---")
 
 
-def kelola_user():
+# ------------------------------------------------------------
+# MANAJEMEN USER
+# ------------------------------------------------------------
+def kelola_user() -> None:
     st.subheader("👥 Manajemen User")
-    conn = get_conn()
-    df = pd.read_sql_query("SELECT id, username, nama_lengkap, role, CASE WHEN aktif=1 THEN 'Aktif' ELSE 'Nonaktif' END AS status, created_at FROM users ORDER BY id DESC", conn)
-    conn.close()
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(fetch_all_users(), use_container_width=True, hide_index=True)
 
+    st.markdown("### ➕ Tambah User")
     with st.form("tambah_user"):
-        c1, c2 = st.columns(2)
-        with c1:
+        col1, col2 = st.columns(2)
+        with col1:
             username = st.text_input("Username baru")
             nama = st.text_input("Nama lengkap")
-        with c2:
+        with col2:
             password = st.text_input("Password", type="password")
             role = st.selectbox("Hak akses", ["user", "admin"])
 
-        submit = st.form_submit_button("Simpan User", use_container_width=True, type="primary")
-
-        if submit:
+        if st.form_submit_button("Simpan User", use_container_width=True, type="primary"):
             if not username.strip() or not password:
                 st.error("Username dan password wajib diisi.")
+            elif len(password) < 6:
+                st.error("Password minimal 6 karakter.")
             else:
-                conn = get_conn()
                 try:
-                    conn.execute("INSERT INTO users (username,password,role,nama_lengkap,aktif) VALUES (?,?,?,?,1)",
-                                 (username.strip(), hash_password(password), role, nama.strip()))
-                    conn.commit()
+                    with get_conn() as conn:
+                        conn.execute(
+                            """INSERT INTO users
+                               (username, password, role, nama_lengkap, aktif)
+                               VALUES (?, ?, ?, ?, 1)""",
+                            (
+                                username.strip(),
+                                hash_password(password),
+                                role,
+                                nama.strip(),
+                            ),
+                        )
+                        conn.commit()
                     st.success("User berhasil ditambahkan.")
                     st.rerun()
                 except sqlite3.IntegrityError:
                     st.error("Username sudah digunakan.")
-                finally:
-                    conn.close()
+
+    st.markdown("### ✏️ Edit / Nonaktifkan User")
+    with get_conn() as conn:
+        users = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT id, username, nama_lengkap, role, aktif FROM users ORDER BY username"
+            ).fetchall()
+        ]
+
+    if not users:
+        return
+
+    pilihan = st.selectbox(
+        "Pilih user",
+        users,
+        format_func=lambda x: f"{x['username']} — {x['nama_lengkap'] or '-'}",
+    )
+
+    with st.form("edit_user"):
+        nama_baru = st.text_input("Nama lengkap", value=pilihan["nama_lengkap"] or "")
+        role_baru = st.selectbox(
+            "Role",
+            ["user", "admin"],
+            index=0 if pilihan["role"] == "user" else 1,
+        )
+        aktif_baru = st.checkbox("Akun aktif", value=bool(pilihan["aktif"]))
+        password_baru = st.text_input(
+            "Password baru (kosongkan jika tidak diubah)", type="password"
+        )
+
+        if st.form_submit_button("💾 Simpan Perubahan", use_container_width=True):
+            with get_conn() as conn:
+                if password_baru:
+                    if len(password_baru) < 6:
+                        st.error("Password minimal 6 karakter.")
+                        return
+                    conn.execute(
+                        """UPDATE users
+                           SET nama_lengkap=?, role=?, aktif=?, password=?
+                           WHERE id=?""",
+                        (
+                            nama_baru.strip(),
+                            role_baru,
+                            int(aktif_baru),
+                            hash_password(password_baru),
+                            pilihan["id"],
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """UPDATE users
+                           SET nama_lengkap=?, role=?, aktif=?
+                           WHERE id=?""",
+                        (
+                            nama_baru.strip(),
+                            role_baru,
+                            int(aktif_baru),
+                            pilihan["id"],
+                        ),
+                    )
+                conn.commit()
+            st.success("Data user berhasil diperbarui.")
+            st.rerun()
 
 
-def kelola_cabor():
+# ------------------------------------------------------------
+# MANAJEMEN CABOR
+# ------------------------------------------------------------
+def kelola_cabor() -> None:
     st.subheader("🏅 Kelola Cabang Olahraga")
-    conn = get_conn()
-    df = pd.read_sql_query("SELECT id, nama, CASE WHEN aktif=1 THEN 'Aktif' ELSE 'Nonaktif' END AS status FROM cabor ORDER BY nama", conn)
-    conn.close()
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(fetch_all_cabor(), use_container_width=True, hide_index=True)
 
     with st.form("tambah_cabor"):
         nama_cabor = st.text_input("Nama Cabang Olahraga Baru")
-        submit = st.form_submit_button("➕ Tambah Cabor", use_container_width=True)
-
-        if submit:
-            if nama_cabor.strip():
-                conn = get_conn()
+        if st.form_submit_button("➕ Tambah Cabor", use_container_width=True):
+            if not nama_cabor.strip():
+                st.error("Nama cabor wajib diisi.")
+            else:
                 try:
-                    conn.execute("INSERT INTO cabor (nama) VALUES (?)", (nama_cabor.strip().upper(),))
-                    conn.commit()
+                    with get_conn() as conn:
+                        conn.execute(
+                            "INSERT INTO cabor (nama) VALUES (?)",
+                            (nama_cabor.strip().upper(),),
+                        )
+                        conn.commit()
                     st.success("Cabor berhasil ditambahkan.")
                     st.rerun()
                 except sqlite3.IntegrityError:
                     st.error("Cabor tersebut sudah ada.")
-                finally:
-                    conn.close()
+
+    st.markdown("### ✏️ Edit / Nonaktifkan Cabor")
+    with get_conn() as conn:
+        rows = [
+            dict(r)
+            for r in conn.execute("SELECT * FROM cabor ORDER BY nama").fetchall()
+        ]
+
+    if not rows:
+        return
+
+    pilihan = st.selectbox("Pilih cabor", rows, format_func=lambda x: x["nama"])
+    with st.form("edit_cabor"):
+        nama_baru = st.text_input("Nama cabor", value=pilihan["nama"])
+        aktif = st.checkbox("Cabor aktif", value=bool(pilihan["aktif"]))
+        if st.form_submit_button("💾 Simpan", use_container_width=True):
+            try:
+                with get_conn() as conn:
+                    conn.execute(
+                        "UPDATE cabor SET nama=?, aktif=? WHERE id=?",
+                        (nama_baru.strip().upper(), int(aktif), pilihan["id"]),
+                    )
+                    conn.commit()
+                st.success("Cabor berhasil diperbarui.")
+                st.rerun()
+            except sqlite3.IntegrityError:
+                st.error("Nama cabor sudah digunakan.")
 
 
-def halaman_laporan_admin():
+# ------------------------------------------------------------
+# LAPORAN ADMIN
+# ------------------------------------------------------------
+def halaman_laporan_admin() -> None:
     st.subheader("📄 Data Laporan Monitoring")
 
-    conn = get_conn()
-    df = pd.read_sql_query("SELECT id, tanggal, cabor, lokasi, petugas, status FROM laporan_monitoring ORDER BY tanggal DESC, id DESC", conn)
-    conn.close()
-
-    if df.empty:
-        st.info("Belum ada laporan masuk.")
-        return
-
-    f1, f2, f3 = st.columns(3)
+    f1, f2, f3, f4 = st.columns(4)
     with f1:
-        cabor_filter = st.selectbox("Filter Cabor", ["Semua"] + sorted(df["cabor"].dropna().unique().tolist()))
+        cabor_opts = ["Semua"] + get_cabor_list()
+        cabor_filter = st.selectbox("Filter Cabor", cabor_opts)
     with f2:
-        status_filter = st.selectbox("Filter Status", ["Semua"] + sorted(df["status"].fillna("Belum Ditindaklanjuti").unique().tolist()))
+        status_filter = st.selectbox("Filter Status", ["Semua"] + STATUS_OPTIONS)
     with f3:
-        keyword = st.text_input("🔎 Cari lokasi / petugas")
+        tgl_awal = st.date_input("Dari tanggal", value=None)
+    with f4:
+        tgl_akhir = st.date_input("Sampai tanggal", value=None)
 
-    filtered = df.copy()
-    if cabor_filter != "Semua":
-        filtered = filtered[filtered["cabor"] == cabor_filter]
-    if status_filter != "Semua":
-        filtered = filtered[filtered["status"].fillna("Belum Ditindaklanjuti") == status_filter]
-    if keyword:
-        mask = filtered["lokasi"].fillna("").str.contains(keyword, case=False) | filtered["petugas"].fillna("").str.contains(keyword, case=False)
-        filtered = filtered[mask]
+    keyword = st.text_input(
+        "🔎 Cari lokasi / petugas / cabor", placeholder="Ketik kata kunci..."
+    )
 
-    st.dataframe(filtered, use_container_width=True, hide_index=True)
+    df = fetch_laporan_list(
+        cabor=cabor_filter,
+        status=status_filter,
+        tgl_awal=tgl_awal if tgl_awal else None,
+        tgl_akhir=tgl_akhir if tgl_akhir else None,
+        keyword=keyword.strip() or None,
+    )
 
-    if filtered.empty:
+    st.caption(f"Menampilkan **{len(df)}** laporan.")
+    if df.empty:
+        st.info("Tidak ada laporan sesuai filter.")
         return
+
+    st.dataframe(df, use_container_width=True, hide_index=True)
 
     st.markdown("---")
-    st.markdown("### 📥 Export & Tindak Lanjut")
+    st.markdown("### 🔍 Detail, Export & Tindak Lanjut")
 
-    pilihan_id = st.selectbox("Pilih ID laporan untuk diunduh / ditindaklanjuti", filtered["id"].tolist())
+    pilihan_id = st.selectbox(
+        "Pilih laporan",
+        df["id"].tolist(),
+        format_func=lambda x: (
+            f"ID {x} — {df.loc[df['id']==x, 'cabor'].values[0]} "
+            f"({df.loc[df['id']==x, 'tanggal'].values[0]}) — "
+            f"{df.loc[df['id']==x, 'status'].values[0]}"
+        ),
+        key="admin_pilih_laporan",
+    )
 
-    conn = get_conn()
-    row = conn.execute("SELECT * FROM laporan_monitoring WHERE id=?", (int(pilihan_id),)).fetchone()
-    conn.close()
+    row = get_laporan_by_id(int(pilihan_id))
+    if not row:
+        st.error("Laporan tidak ditemukan.")
+        return
 
-    if row:
-        c1, c2 = st.columns(2)
-        with c1:
-            word_file = generate_word_report([dict(row)], is_all=False)
-            st.download_button(
-                "📄 Download Laporan Word (Rapi & Profesional)",
-                data=word_file,
-                file_name=f"Laporan_{row['cabor']}_{row['tanggal']}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True,
-                type="primary"
-            )
+    with st.expander("📋 Lihat Detail Lengkap", expanded=False):
+        render_detail_laporan(row)
 
-        with c2:
-            with st.form("update_status_laporan"):
-                status = st.selectbox("Status", ["Belum Ditindaklanjuti", "Sedang Ditindaklanjuti", "Selesai"], index=["Belum Ditindaklanjuti", "Sedang Ditindaklanjuti", "Selesai"].index(row["status"] or "Belum Ditindaklanjuti"))
-                catatan = st.text_area("Catatan Admin", value=row["catatan_admin"] or "")
-                simpan = st.form_submit_button("💾 Simpan Status", use_container_width=True)
+    col_w, col_x, col_d = st.columns(3)
+    with col_w:
+        word_file = generate_word_report([dict(row)], is_all=False)
+        st.download_button(
+            "⬇️ Word Satuan",
+            data=word_file,
+            file_name=f"Laporan_{row['cabor']}_{row['tanggal']}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True,
+        )
+    with col_x:
+        excel_file = generate_excel_report(df)
+        st.download_button(
+            "⬇️ Excel (hasil filter)",
+            data=excel_file,
+            file_name=f"Rekap_Monev_{datetime.date.today()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    with col_d:
+        if st.button("🗑️ Hapus Laporan", use_container_width=True):
+            st.session_state["confirm_delete_id"] = int(pilihan_id)
 
-                if simpan:
-                    conn = get_conn()
-                    conn.execute("UPDATE laporan_monitoring SET status=?, catatan_admin=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (status, catatan, int(pilihan_id)))
-                    conn.commit()
-                    conn.close()
-                    st.success("Tindak lanjut diperbarui.")
-                    st.rerun()
+    if st.session_state.get("confirm_delete_id") == int(pilihan_id):
+        st.warning(
+            f"Yakin hapus laporan ID {pilihan_id}? Tindakan ini tidak dapat dibatalkan."
+        )
+        c_yes, c_no = st.columns(2)
+        with c_yes:
+            if st.button("✅ Ya, Hapus", type="primary", use_container_width=True):
+                delete_laporan(int(pilihan_id))
+                st.session_state.pop("confirm_delete_id", None)
+                st.success("Laporan berhasil dihapus.")
+                st.rerun()
+        with c_no:
+            if st.button("❌ Batal", use_container_width=True):
+                st.session_state.pop("confirm_delete_id", None)
+                st.rerun()
+
+    st.markdown("#### 📚 Export Rekap Word (semua hasil filter)")
+    if st.button("Generate Word Rekap", use_container_width=True):
+        ids = tuple(int(x) for x in df["id"].tolist())
+        placeholders = ",".join("?" * len(ids))
+        with get_conn() as conn:
+            rows = conn.execute(
+                f"""SELECT * FROM laporan_monitoring
+                    WHERE id IN ({placeholders})
+                    ORDER BY tanggal ASC, id ASC""",
+                ids,
+            ).fetchall()
+        word_rekap = generate_word_report([dict(r) for r in rows], is_all=True)
+        st.download_button(
+            "⬇️ Download Rekap Word",
+            data=word_rekap,
+            file_name=f"Rekap_Monev_{datetime.date.today()}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True,
+        )
+
+    st.markdown("---")
+    st.markdown("### ✏️ Tindak Lanjut Laporan")
+    with st.form("update_status_laporan"):
+        current = row["status"] or DEFAULT_STATUS
+        status = st.selectbox(
+            "Status tindak lanjut",
+            STATUS_OPTIONS,
+            index=STATUS_OPTIONS.index(current) if current in STATUS_OPTIONS else 0,
+        )
+        catatan = st.text_area(
+            "Catatan Admin / Rekomendasi",
+            value=row["catatan_admin"] or "",
+            height=100,
+        )
+        if st.form_submit_button("💾 Simpan Tindak Lanjut", use_container_width=True):
+            with get_conn() as conn:
+                conn.execute(
+                    """UPDATE laporan_monitoring
+                       SET status=?, catatan_admin=?, updated_at=CURRENT_TIMESTAMP
+                       WHERE id=?""",
+                    (status, catatan, int(pilihan_id)),
+                )
+                conn.commit()
+            st.success("Tindak lanjut berhasil diperbarui.")
+            st.rerun()
 
 
-def halaman_admin():
-    sidebar_app()
+# ------------------------------------------------------------
+# HALAMAN ADMIN
+# ------------------------------------------------------------
+def halaman_admin() -> None:
+    st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+    render_sidebar()
     dashboard_admin()
 
-    tab1, tab2, tab3 = st.tabs(["📄 Laporan Monitoring", "👥 Manajemen User", "🏅 Kelola Cabor"])
+    tab1, tab2, tab3 = st.tabs([
+        "📄 Laporan Monitoring",
+        "👥 Manajemen User",
+        "🏅 Kelola Cabor",
+    ])
     with tab1:
         halaman_laporan_admin()
     with tab2:
@@ -622,137 +1197,296 @@ def halaman_admin():
         kelola_cabor()
 
 
-# ============================================================
-# HALAMAN USER / PETUGAS (INPUT & UNDUH)
-# ============================================================
-def halaman_user():
-    sidebar_app()
-
-    st.markdown("## 📝 Form Input Monitoring Lapangan")
-    st.caption(f"Petugas: **{st.session_state.get('nama_lengkap', st.session_state['username'])}**")
+# ------------------------------------------------------------
+# HALAMAN PETUGAS
+# ------------------------------------------------------------
+def form_input_monitoring() -> None:
+    st.markdown(
+        """
+        <div class="main-header">
+            <h1>📝 Form Input Monitoring</h1>
+            <p>Isi laporan monitoring cabang olahraga secara lengkap</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        f"Petugas: **{st.session_state.get('nama_lengkap', st.session_state['username'])}**"
+    )
 
     cabor_list = get_cabor_list()
 
-    with st.form("form_monitoring", clear_on_submit=False):
-        st.markdown("### 📌 Informasi Dasar & Lokasi Real")
-        col1, col2 = st.columns(2)
+    # ----------------------------------------------------------
+    # UPLOAD FOTO DI LUAR FORM
+    # (file_uploader di dalam form sering tidak muncul di Cloud)
+    # ----------------------------------------------------------
+    st.markdown(
+        '<span class="section-badge">📷 Dokumentasi Foto</span>',
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Upload foto kegiatan **sebelum** mengisi form di bawah. Bisa lebih dari satu foto."
+    )
+    uploaded_files = st.file_uploader(
+        "Pilih foto (JPG / PNG / WEBP)",
+        type=["jpg", "jpeg", "png", "webp"],
+        accept_multiple_files=True,
+        key="uploader_monitoring",
+        help="Foto akan ikut tersimpan di laporan dan muncul di file Word saat diunduh.",
+    )
+    if uploaded_files:
+        st.success(f"✅ {len(uploaded_files)} foto siap diunggah bersama laporan.")
+        preview_cols = st.columns(min(4, len(uploaded_files)))
+        for i, f in enumerate(uploaded_files):
+            with preview_cols[i % len(preview_cols)]:
+                st.image(f, caption=f.name, use_container_width=True)
+    else:
+        st.info(
+            "Belum ada foto dipilih. Foto opsional, tapi disarankan untuk dokumentasi."
+        )
 
+    st.markdown("---")
+
+    with st.form("form_monitoring", clear_on_submit=True):
+        st.markdown(
+            '<span class="section-badge">📌 Informasi Dasar</span>',
+            unsafe_allow_html=True,
+        )
+        col1, col2 = st.columns(2)
         with col1:
             tanggal = st.date_input("Tanggal Monitoring", datetime.date.today())
             cabor = st.selectbox("Cabang Olahraga", ["Pilih Cabor..."] + cabor_list)
-
         with col2:
-            lokasi = st.text_input("Lokasi Latihan / Stadion / Gelanggang (Real)", placeholder="Contoh: GOR Stadion Benteng Reborn")
-            gps_input = st.text_input("Koordinat GPS / Link Google Maps (Opsional)", placeholder="-6.175392, 106.638210")
-
-        st.markdown("---")
-        st.markdown("### 📷 Upload Foto Dokumentasi (Wajib Time Mark & Lokasi)")
-        foto_file = st.file_uploader("Unggah Foto Kegiatan Monev (JPG/PNG)", type=["jpg", "jpeg", "png"])
+            lokasi = st.text_input(
+                "Lokasi Latihan / Try-out", placeholder="Contoh: GOR Cikokol"
+            )
 
         st.markdown("---")
 
         with st.expander("💪 1. Performa Fisik & Kebugaran", expanded=True):
-            fisik_1 = st.text_area("Capaian parameter fisik (vs target):", height=68)
-            fisik_2 = st.text_area("Grafik performa puncak (peaking):", height=68)
-            fisik_3 = st.text_area("Tingkat pemulihan fisik (recovery):", height=68)
-            fisik_4 = st.text_area("Keluhan cedera lama / baru:", height=68)
+            fisik_1 = st.text_area(
+                "Capaian parameter fisik (vs benchmark target):", height=70
+            )
+            fisik_2 = st.text_area(
+                "Apakah atlet mencapai grafik performa puncak (peaking)?", height=70
+            )
+            fisik_3 = st.text_area("Tingkat pemulihan fisik (recovery):", height=70)
+            fisik_4 = st.text_area(
+                "Keluhan cedera lama / indikasi cedera baru:", height=70
+            )
 
         with st.expander("🎯 2. Kesiapan Taktis & Strategi"):
-            taktis_1 = st.text_area("Pemetaan kekuatan lawan:", height=68)
-            taktis_2 = st.text_area("Instruksi teknis di bawah tekanan:", height=68)
-            taktis_3 = st.text_area("Hasil try-out / sparing:", height=68)
+            taktis_1 = st.text_area("Pemetaan kekuatan calon lawan:", height=70)
+            taktis_2 = st.text_area(
+                "Kemampuan mengikuti instruksi teknis di bawah tekanan:", height=70
+            )
+            taktis_3 = st.text_area("Hasil try-out / sparing:", height=70)
 
-        with st.expander("🧠 3. Mental & Psikologis"):
-            mental_1 = st.text_area("Pengendalian kecemasan & stres:", height=68)
-            mental_2 = st.text_area("Fokus & self-confidence:", height=68)
-            mental_3 = st.text_area("Rutinitas mental khusus:", height=68)
-            mental_4 = st.text_area("Koordinasi dengan psikolog:", height=68)
+        with st.expander("🧠 3. Mental, Psikologis & Kesiapan Mental"):
+            mental_1 = st.text_area(
+                "Tingkat kecemasan & kemampuan mengendalikan stres:", height=70
+            )
+            mental_2 = st.text_area(
+                "Fokus, motivasi, dan self-confidence:", height=70
+            )
+            mental_3 = st.text_area(
+                "Rutinitas mental khusus saat bertanding:", height=70
+            )
+            mental_4 = st.text_area(
+                "Koordinasi dengan tim psikolog olahraga:", height=70
+            )
 
-        with st.expander("🥗 4. Nutrisi & Gaya Hidup"):
-            nutrisi_1 = st.text_area("Penyesuaian berat badan:", height=68)
-            nutrisi_2 = st.text_area("Asupan nutrisi & suplemen:", height=68)
-            nutrisi_3 = st.text_area("Status hidrasi harian:", height=68)
-            nutrisi_4 = st.text_area("Kualitas & waktu tidur:", height=68)
+        with st.expander("🥗 4. Nutrisi, Berat Badan & Gaya Hidup"):
+            nutrisi_1 = st.text_area("Progres penyesuaian berat badan:", height=70)
+            nutrisi_2 = st.text_area(
+                "Pemantauan asupan nutrisi dan suplemen:", height=70
+            )
+            nutrisi_3 = st.text_area("Status hidrasi harian atlet:", height=70)
+            nutrisi_4 = st.text_area(
+                "Kualitas dan kecukupan waktu tidur:", height=70
+            )
 
         with st.expander("⚕️ 5. Medis, Bebas Doping & Logistik"):
-            medis_1 = st.text_area("Status rekam medis & fisioterapis:", height=68)
-            medis_2 = st.text_area("Keamanan obat/suplemen (Bebas Doping):", height=68)
-            medis_3 = st.text_area("Kesiapan alat tanding:", height=68)
-            medis_4 = st.text_area("Kendala non-teknis:", height=68)
+            medis_1 = st.text_area(
+                "Status rekam medis terkini & kesiapan fisioterapis:", height=70
+            )
+            medis_2 = st.text_area(
+                "Keamanan obat, suplemen (Bebas Doping):", height=70
+            )
+            medis_3 = st.text_area(
+                "Kesiapan perlengkapan khusus bertanding:", height=70
+            )
+            medis_4 = st.text_area(
+                "Kendala non-teknis (akomodasi, transportasi):", height=70
+            )
 
         st.markdown("---")
-        submitted = st.form_submit_button("💾 Simpan Laporan & Buat Dokumen Word", use_container_width=True, type="primary")
+        n_ready = len(uploaded_files) if uploaded_files else 0
+        if n_ready:
+            st.caption(f"📷 {n_ready} foto akan disimpan bersama laporan ini.")
+        else:
+            st.caption(
+                "📷 Tidak ada foto yang dipilih (laporan tetap bisa disimpan tanpa foto)."
+            )
+
+        submitted = st.form_submit_button(
+            "💾 Simpan Laporan Monitoring",
+            use_container_width=True,
+            type="primary",
+        )
 
         if submitted:
             if cabor == "Pilih Cabor...":
                 st.error("⚠️ Harap pilih Cabang Olahraga.")
             elif not lokasi.strip():
                 st.error("⚠️ Lokasi wajib diisi.")
-            elif not foto_file:
-                st.error("⚠️ Foto Dokumentasi wajib diunggah untuk mencetak Time Mark & Real Lokasi.")
             else:
-                # Waktu real time mark saat diunggah
-                now_str = datetime.datetime.now().strftime("%d-%m-%Y %H:%M:%S WIB")
-                
-                # Buat Watermark pada Foto
-                raw_bytes = foto_file.read()
-                watermarked_photo = beri_watermark_foto(
-                    image_bytes=raw_bytes,
-                    timestamp_str=now_str,
-                    lokasi_str=lokasi.strip(),
-                    gps_str=gps_input.strip()
-                )
-
-                conn = get_conn()
-                cursor = conn.cursor()
-                cursor.execute(
-                    """INSERT INTO laporan_monitoring (
-                        tanggal, cabor, lokasi, petugas,
-                        fisik_parameter, fisik_peaking, fisik_recovery, fisik_cedera,
-                        taktis_lawan, taktis_instruksi, taktis_ujicoba,
-                        mental_cemas, mental_fokus, mental_rutinitas, mental_psikolog,
-                        nutrisi_bb, nutrisi_asupan, nutrisi_hidrasi, nutrisi_tidur,
-                        medis_rekam, medis_doping, medis_alat, medis_nonteknis,
-                        status, catatan_admin, foto_data, koordinat_gps
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (
-                        tanggal, cabor, lokasi.strip(), st.session_state["username"],
-                        fisik_1, fisik_2, fisik_3, fisik_4,
-                        taktis_1, taktis_2, taktis_3,
-                        mental_1, mental_2, mental_3, mental_4,
-                        nutrisi_1, nutrisi_2, nutrisi_3, nutrisi_4,
-                        medis_1, medis_2, medis_3, medis_4,
-                        "Belum Ditindaklanjuti", "", watermarked_photo, gps_input.strip()
+                with get_conn() as conn:
+                    cur = conn.execute(
+                        """INSERT INTO laporan_monitoring (
+                            tanggal, cabor, lokasi, petugas,
+                            fisik_parameter, fisik_peaking, fisik_recovery, fisik_cedera,
+                            taktis_lawan, taktis_instruksi, taktis_ujicoba,
+                            mental_cemas, mental_fokus, mental_rutinitas, mental_psikolog,
+                            nutrisi_bb, nutrisi_asupan, nutrisi_hidrasi, nutrisi_tidur,
+                            medis_rekam, medis_doping, medis_alat, medis_nonteknis,
+                            status, catatan_admin
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            tanggal,
+                            cabor,
+                            lokasi.strip(),
+                            st.session_state["username"],
+                            fisik_1,
+                            fisik_2,
+                            fisik_3,
+                            fisik_4,
+                            taktis_1,
+                            taktis_2,
+                            taktis_3,
+                            mental_1,
+                            mental_2,
+                            mental_3,
+                            mental_4,
+                            nutrisi_1,
+                            nutrisi_2,
+                            nutrisi_3,
+                            nutrisi_4,
+                            medis_1,
+                            medis_2,
+                            medis_3,
+                            medis_4,
+                            DEFAULT_STATUS,
+                            "",
+                        ),
                     )
+                    laporan_id = cur.lastrowid
+                    conn.commit()
+
+                files_to_save = (
+                    st.session_state.get("uploader_monitoring")
+                    or uploaded_files
+                    or []
                 )
-                conn.commit()
-                last_id = cursor.lastrowid
-                conn.close()
+                n_foto = save_uploaded_photos(laporan_id, files_to_save)
 
-                st.session_state["last_saved_id"] = last_id
-                st.success("✅ Laporan berhasil disimpan beserta Watermark Time Mark & Lokasi!")
+                msg = f"✅ Laporan berhasil disimpan (ID: {laporan_id})."
+                if n_foto:
+                    msg += f" **{n_foto} foto** ikut tersimpan dan akan muncul di file Word."
+                else:
+                    msg += " (tanpa foto)"
+                st.success(msg)
+                st.info(
+                    "Admin dapat melihat dan menindaklanjuti laporan Anda. "
+                    "Cek tab **Laporan Saya** untuk mengunduh Word."
+                )
 
-    # JIKA LAPORAN BARU SAJA DISIMPAN -> TAMPILKAN TOMBOL UNDUH WORD LANGSUNG
-    if "last_saved_id" in st.session_state:
-        conn = get_conn()
-        saved_row = conn.execute("SELECT * FROM laporan_monitoring WHERE id=?", (st.session_state["last_saved_id"],)).fetchone()
-        conn.close()
 
-        if saved_row:
-            st.markdown("### 📄 Unduh Laporan Siap Cetak")
-            word_file = generate_word_report([dict(saved_row)], is_all=False)
-            st.download_button(
-                "⬇️ Unduh Laporan Word (.docx) Rapi & Profesional",
-                data=word_file,
-                file_name=f"Laporan_Monev_{saved_row['cabor']}_{saved_row['tanggal']}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True,
-                type="primary"
-            )
+def halaman_laporan_saya() -> None:
+    st.markdown(
+        """
+        <div class="main-header">
+            <h1>📂 Laporan Saya</h1>
+            <p>Daftar laporan yang pernah Anda input — unduh & lihat status</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    username = st.session_state["username"]
+
+    f1, f2 = st.columns(2)
+    with f1:
+        status_f = st.selectbox(
+            "Filter Status", ["Semua"] + STATUS_OPTIONS, key="user_status_f"
+        )
+    with f2:
+        keyword = st.text_input("🔎 Cari cabor / lokasi", key="user_kw")
+
+    df = fetch_laporan_list(
+        petugas=username,
+        status=status_f if status_f != "Semua" else None,
+        keyword=keyword.strip() or None,
+    )
+
+    if df.empty:
+        st.info(
+            "Belum ada laporan. Silakan input melalui tab **Form Input Monitoring**."
+        )
+        return
+
+    st.caption(f"Total **{len(df)}** laporan Anda.")
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    st.markdown("### 📥 Detail & Download")
+
+    pilihan_id = st.selectbox(
+        "Pilih laporan",
+        df["id"].tolist(),
+        format_func=lambda x: (
+            f"ID {x} — {df.loc[df['id']==x, 'cabor'].values[0]} "
+            f"({df.loc[df['id']==x, 'tanggal'].values[0]}) — "
+            f"{df.loc[df['id']==x, 'status'].values[0]}"
+        ),
+        key="user_pilih_laporan",
+    )
+
+    row = get_laporan_by_id(int(pilihan_id))
+    if not row:
+        st.error("Laporan tidak ditemukan.")
+        return
+
+    with st.expander("📋 Lihat Detail Lengkap", expanded=True):
+        render_detail_laporan(row)
+
+    word_file = generate_word_report([dict(row)], is_all=False)
+    st.download_button(
+        label="⬇️ Download Laporan Word (termasuk foto)",
+        data=word_file,
+        file_name=f"Laporan_{row['cabor']}_{row['tanggal']}.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        use_container_width=True,
+        type="primary",
+    )
+
+
+def halaman_user() -> None:
+    st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+    render_sidebar()
+
+    tab1, tab2 = st.tabs([
+        "📝 Form Input Monitoring",
+        "📂 Laporan Saya",
+    ])
+    with tab1:
+        form_input_monitoring()
+    with tab2:
+        halaman_laporan_saya()
 
 
 # ============================================================
-# ROUTER
+# ENTRY POINT
 # ============================================================
 init_db()
 
