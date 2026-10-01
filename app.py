@@ -4,22 +4,17 @@ import sqlite3
 import pandas as pd
 from io import BytesIO
 from docx import Document
-from docx.shared import Pt, Inches
+from docx.shared import Pt
 
 # --- 1. INISIALISASI DATABASE ---
 def init_db():
     conn = sqlite3.connect('monitoring.db')
     cursor = conn.cursor()
     
-    # Tabel Pengguna (Admin & User)
     cursor.execute('''CREATE TABLE IF NOT EXISTS users (
                         id INTEGER PRIMARY KEY, username TEXT, password TEXT, role TEXT)''')
-    
-    # Tabel Cabang Olahraga
     cursor.execute('''CREATE TABLE IF NOT EXISTS cabor (
                         id INTEGER PRIMARY KEY, nama TEXT)''')
-    
-    # Tabel Laporan (Diperbarui dengan pembuat laporan)
     cursor.execute('''CREATE TABLE IF NOT EXISTS laporan_monitoring (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         tanggal DATE, cabor TEXT, lokasi TEXT, petugas TEXT,
@@ -29,78 +24,92 @@ def init_db():
                         nutrisi_bb TEXT, nutrisi_asupan TEXT, nutrisi_hidrasi TEXT, nutrisi_tidur TEXT,
                         medis_rekam TEXT, medis_doping TEXT, medis_alat TEXT, medis_nonteknis TEXT)''')
     
-    # Insert Default Users (Jika kosong)
     cursor.execute("SELECT COUNT(*) FROM users")
     if cursor.fetchone()[0] == 0:
         cursor.execute("INSERT INTO users (username, password, role) VALUES ('admin', 'admin123', 'admin')")
         cursor.execute("INSERT INTO users (username, password, role) VALUES ('petugas', 'petugas123', 'user')")
         
-    # Insert Default Cabor (Jika kosong)
     cursor.execute("SELECT COUNT(*) FROM cabor")
     if cursor.fetchone()[0] == 0:
-        default_cabor = ['Panahan', 'Taekwondo', 'Sepatu Roda', 'Judo', 'Sepak Takraw', 'Catur', 'Sepak Bola']
+        default_cabor = [
+            'ANGGAR', 'ANGKAT BERAT', 'ANGKAT BESI', 'AQUATIC/RENANG', 'ARUNG JERAM',
+            'ATLETIK', 'BALAP SEPEDA', 'BARONGSAI', 'BERMOTOR', 'BILLIARD', 'BINARAGA',
+            'BOLA BASKET', 'BOLA TANGAN', 'BOLA VOLI', 'BOWLING', 'BRIDGE', 'BULUTANGKIS',
+            'CATUR', 'DAYUNG', 'DRUMBAND', 'E-SPORT', 'FLOOR BALL', 'FUTSAL', 'GATEBALL',
+            'GOLF', 'GULAT', 'GYMNASTIC/SENAM', 'HOKI', 'IBCA MMA', 'JU JITSU', 'JUDO',
+            'KARATE', 'KEMPO', 'MENEMBAK', 'MUAYTHAI', 'PANAHAN', 'PANJAT TEBING',
+            'PENCAK SILAT', 'PETANQUE', 'PICKLEBALL', 'RUGBY', 'SAMBO', 'SELAM',
+            'SEPAK BOLA', 'SEPAK TAKRAW', 'SEPATU RODA', 'SOFTBALL', 'SQUASH',
+            'TAEKWONDO', 'TARUNG DERAJAT', 'TENIS LAPANG', 'TENIS MEJA', 'TINJU',
+            'WOODBALL', 'WUSHU'
+        ]
         for c in default_cabor:
             cursor.execute("INSERT INTO cabor (nama) VALUES (?)", (c,))
             
     conn.commit()
     conn.close()
 
-# --- 2. GENERATE WORD DOCUMENT ---
-def generate_word_report(data):
+# --- 2. GENERATE WORD (Bisa untuk 1 laporan atau Semua) ---
+def generate_word_report(data_list, is_all=False):
     doc = Document()
     
-    # Judul Dokumen
-    title = doc.add_heading('LAPORAN MONEV BINPRES', 0)
-    title.alignment = 1 # Center
+    judul_utama = 'REKAPITULASI SEMUA LAPORAN MONEV BINPRES' if is_all else 'LAPORAN MONEV BINPRES'
+    title = doc.add_heading(judul_utama, 0)
+    title.alignment = 1 
     
-    # Header Info
-    doc.add_paragraph(f"Cabang Olahraga\t: {data['cabor']}")
-    doc.add_paragraph(f"Tanggal\t\t: {data['tanggal']}")
-    doc.add_paragraph(f"Lokasi\t\t: {data['lokasi']}")
-    doc.add_paragraph(f"Petugas Monev\t: {data['petugas']}")
-    doc.add_paragraph("-" * 50)
-    
-    # Fungsi pembantu untuk membuat sub-bab
-    def add_section(title, questions_answers):
-        doc.add_heading(title, level=2)
-        for q, a in questions_answers:
-            p = doc.add_paragraph()
-            p.add_run(q).bold = True
-            doc.add_paragraph(a if a else "-")
-    
-    add_section('1. Performa Fisik & Kebugaran', [
-        ('Capaian parameter fisik (kekuatan, daya tahan, kecepatan, kelincahan):', data['fisik_parameter']),
-        ('Apakah atlet mencapai grafik performa puncak (peaking)?', data['fisik_peaking']),
-        ('Tingkat pemulihan fisik (recovery) harian pasca-latihan:', data['fisik_recovery']),
-        ('Keluhan cedera lama/baru:', data['fisik_cedera'])
-    ])
-    
-    add_section('2. Kesiapan Taktis & Penguasaan Strategi', [
-        ('Pemetaan kekuatan calon lawan:', data['taktis_lawan']),
-        ('Kemampuan mengikuti instruksi teknis di bawah tekanan:', data['taktis_instruksi']),
-        ('Hasil try-out / sparing:', data['taktis_ujicoba'])
-    ])
-    
-    add_section('3. Mental, Psikologis & Kesiapan Mental', [
-        ('Tingkat kecemasan & pengendalian stres:', data['mental_cemas']),
-        ('Fokus, motivasi, dan self-confidence:', data['mental_fokus']),
-        ('Rutinitas mental khusus saat bertanding:', data['mental_rutinitas']),
-        ('Koordinasi dengan psikolog olahraga:', data['mental_psikolog'])
-    ])
-    
-    add_section('4. Nutrisi, Berat Badan & Gaya Hidup', [
-        ('Progres penyesuaian berat badan:', data['nutrisi_bb']),
-        ('Asupan nutrisi dan suplemen:', data['nutrisi_asupan']),
-        ('Status hidrasi:', data['nutrisi_hidrasi']),
-        ('Kualitas dan kecukupan tidur:', data['nutrisi_tidur'])
-    ])
-    
-    add_section('5. Medis, Bebas Doping & Logistik', [
-        ('Status rekam medis & kesiapan tim medis:', data['medis_rekam']),
-        ('Keamanan obat, suplemen (Bebas Doping):', data['medis_doping']),
-        ('Kesiapan perlengkapan tanding:', data['medis_alat']),
-        ('Kendala non-teknis (akomodasi, transportasi):', data['medis_nonteknis'])
-    ])
+    for idx, data in enumerate(data_list):
+        if is_all:
+            doc.add_heading(f"Laporan {idx+1}: {data['cabor']} - {data['tanggal']}", level=1)
+            
+        doc.add_paragraph(f"Cabang Olahraga\t: {data['cabor']}")
+        doc.add_paragraph(f"Tanggal\t\t: {data['tanggal']}")
+        doc.add_paragraph(f"Lokasi\t\t: {data['lokasi']}")
+        doc.add_paragraph(f"Petugas Monev\t: {data['petugas']}")
+        doc.add_paragraph("-" * 50)
+        
+        def add_section(title, questions_answers):
+            doc.add_heading(title, level=2)
+            for q, a in questions_answers:
+                p = doc.add_paragraph()
+                p.add_run(q).bold = True
+                doc.add_paragraph(a if a else "-")
+        
+        add_section('1. Performa Fisik & Kebugaran', [
+            ('Capaian parameter fisik (kekuatan, daya tahan, kecepatan, kelincahan):', data['fisik_parameter']),
+            ('Apakah atlet mencapai grafik performa puncak (peaking)?', data['fisik_peaking']),
+            ('Tingkat pemulihan fisik (recovery) harian pasca-latihan:', data['fisik_recovery']),
+            ('Keluhan cedera lama/baru:', data['fisik_cedera'])
+        ])
+        
+        add_section('2. Kesiapan Taktis & Penguasaan Strategi', [
+            ('Pemetaan kekuatan calon lawan:', data['taktis_lawan']),
+            ('Kemampuan mengikuti instruksi teknis di bawah tekanan:', data['taktis_instruksi']),
+            ('Hasil try-out / sparing:', data['taktis_ujicoba'])
+        ])
+        
+        add_section('3. Mental, Psikologis & Kesiapan Mental', [
+            ('Tingkat kecemasan & pengendalian stres:', data['mental_cemas']),
+            ('Fokus, motivasi, dan self-confidence:', data['mental_fokus']),
+            ('Rutinitas mental khusus saat bertanding:', data['mental_rutinitas']),
+            ('Koordinasi dengan psikolog olahraga:', data['mental_psikolog'])
+        ])
+        
+        add_section('4. Nutrisi, Berat Badan & Gaya Hidup', [
+            ('Progres penyesuaian berat badan:', data['nutrisi_bb']),
+            ('Asupan nutrisi dan suplemen:', data['nutrisi_asupan']),
+            ('Status hidrasi:', data['nutrisi_hidrasi']),
+            ('Kualitas dan kecukupan tidur:', data['nutrisi_tidur'])
+        ])
+        
+        add_section('5. Medis, Bebas Doping & Logistik', [
+            ('Status rekam medis & kesiapan tim medis:', data['medis_rekam']),
+            ('Keamanan obat, suplemen (Bebas Doping):', data['medis_doping']),
+            ('Kesiapan perlengkapan tanding:', data['medis_alat']),
+            ('Kendala non-teknis (akomodasi, transportasi):', data['medis_nonteknis'])
+        ])
+        
+        if idx < len(data_list) - 1:
+            doc.add_page_break()
     
     bio = BytesIO()
     doc.save(bio)
@@ -151,30 +160,51 @@ def halaman_admin():
             
             st.markdown("---")
             st.write("**Unduh Laporan ke Word (.docx)**")
-            pilih_id = st.selectbox("Pilih ID Laporan untuk diunduh:", df['id'].tolist())
             
-            if st.button("Generate Dokumen"):
-                cursor = conn.cursor()
-                # Ambil semua data berdasarkan ID
-                cursor.execute("SELECT * FROM laporan_monitoring WHERE id=?", (pilih_id,))
-                row = cursor.fetchone()
-                # Mapping nama kolom agar sesuai fungsi docx
-                col_names = [description[0] for description in cursor.description]
-                data_dict = dict(zip(col_names, row))
-                
-                word_file = generate_word_report(data_dict)
-                st.download_button(
-                    label="📥 Download File Word",
-                    data=word_file,
-                    file_name=f"Laporan_{data_dict['cabor']}_{data_dict['tanggal']}.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                )
+            col_a, col_b = st.columns(2)
+            
+            with col_a:
+                st.info("Unduh Satu Laporan Spesifik")
+                pilih_id = st.selectbox("Pilih ID Laporan:", df['id'].tolist())
+                if st.button("Generate Word (Satuan)"):
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT * FROM laporan_monitoring WHERE id=?", (pilih_id,))
+                    row = cursor.fetchone()
+                    col_names = [desc[0] for desc in cursor.description]
+                    data_dict = dict(zip(col_names, row))
+                    
+                    word_file = generate_word_report([data_dict], is_all=False)
+                    st.download_button(
+                        label="📥 Download File Word Satuan",
+                        data=word_file,
+                        file_name=f"Laporan_{data_dict['cabor']}_{data_dict['tanggal']}.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    )
+            
+            with col_b:
+                st.success("Unduh Semua Laporan Sekaligus")
+                st.write(f"Total ada **{len(df)}** laporan tersimpan.")
+                if st.button("Generate Word (Semua Laporan)"):
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT * FROM laporan_monitoring ORDER BY id ASC")
+                    rows = cursor.fetchall()
+                    col_names = [desc[0] for desc in cursor.description]
+                    
+                    semua_data = [dict(zip(col_names, row)) for row in rows]
+                    
+                    word_file = generate_word_report(semua_data, is_all=True)
+                    st.download_button(
+                        label="📥 Download Rekap Semua Laporan",
+                        data=word_file,
+                        file_name=f"Rekap_Semua_Monev_{datetime.date.today()}.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    )
         conn.close()
 
     with tab2:
         st.subheader("Daftar Cabang Olahraga")
         conn = sqlite3.connect('monitoring.db')
-        cabor_df = pd.read_sql_query("SELECT * FROM cabor", conn)
+        cabor_df = pd.read_sql_query("SELECT * FROM cabor ORDER BY nama ASC", conn)
         st.dataframe(cabor_df, use_container_width=True, hide_index=True)
         
         with st.form("tambah_cabor"):
@@ -211,7 +241,6 @@ def halaman_user():
         with col2:
             lokasi = st.text_input("Lokasi Latihan / Try-out")
 
-        # Expander Indikator (Sesuai Materi)
         with st.expander("💪 1. Performa Fisik & Kebugaran"):
             fisik_1 = st.text_area("Capaian parameter fisik (vs benchmark target):", height=68)
             fisik_2 = st.text_area("Apakah atlet mencapai grafik performa puncak (peaking)?", height=68)
