@@ -13,13 +13,12 @@ import urllib.parse
 # KONFIGURASI HALAMAN & CSS
 # ==========================================
 st.set_page_config(
-    page_title="Monitoring Binpres KONI",
+    page_title="Monitoring Latihan KONI",
     page_icon="🏆",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS untuk Desain Keren & Profesional
 st.markdown("""
     <style>
     .main-header { font-size: 38px; font-weight: 800; color: #1E3A8A; text-align: center; margin-bottom: -10px; }
@@ -34,7 +33,7 @@ st.markdown("""
 # ==========================================
 # 1. KONFIGURASI DATABASE & AUTHENTICATION
 # ==========================================
-DB_NAME = "monitoring.db"
+DB_NAME = "monitoring_latihan.db"
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -42,7 +41,6 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT, role TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS schedules (id INTEGER PRIMARY KEY AUTOINCREMENT, cabor TEXT, tanggal TEXT, tempat TEXT)''')
     
-    # Tambahan: Tabel untuk menyimpan file Laporan
     c.execute('''CREATE TABLE IF NOT EXISTS reports (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, 
                     cabor TEXT, 
@@ -51,10 +49,8 @@ def init_db():
                     file_name TEXT, 
                     file_data BLOB)''')
 
-    # Fitur Hapus Otomatis: Hapus laporan yang lebih dari 30 hari
     c.execute("DELETE FROM reports WHERE submit_time < datetime('now', '-30 days')")
 
-    # Buat akun admin default jika belum ada
     c.execute("SELECT * FROM users WHERE username='admin'")
     if not c.fetchone():
         hashed_pw = bcrypt.hashpw('admin123'.encode('utf-8'), bcrypt.gensalt())
@@ -75,7 +71,6 @@ def authenticate(username, password):
             return True, role
     return False, None
 
-# Fungsi Format Waktu Bahasa Indonesia
 def get_current_time_id():
     now = datetime.datetime.now()
     hari = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
@@ -85,32 +80,30 @@ def get_current_time_id():
 # ==========================================
 # 2. FUNGSI GENERATE WORD (.docx)
 # ==========================================
-def generate_word_report(petugas_text, cabor, tanggal, tempat, catatan, fotos):
+def generate_word_report(petugas_text, cabor, tanggal, tempat, jumlah_atlet, catatan, fotos):
     doc = Document()
     
     # Header Dokumen
-    head = doc.add_heading('LAPORAN MONITORING CABANG OLAHRAGA', 0)
+    head = doc.add_heading('LAPORAN MONITORING LATIHAN CABANG OLAHRAGA\nKONI KABUPATEN TANGERANG', 0)
     head.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    # Info Jadwal
+    # Menambahkan data ke dalam dokumen Word
     doc.add_paragraph(f"Cabang Olahraga\t: {cabor}")
-    doc.add_paragraph(f"Tanggal\t\t: {tanggal}")
-    doc.add_paragraph(f"Tempat\t\t: {tempat}\n")
+    doc.add_paragraph(f"Tanggal Latihan\t: {tanggal}")
+    doc.add_paragraph(f"Tempat Latihan\t: {tempat}")
+    doc.add_paragraph(f"Jumlah Atlet Hadir\t: {jumlah_atlet} Orang\n") # Baris baru untuk jumlah atlet
     
-    # Daftar Petugas
-    doc.add_heading('Daftar Petugas:', level=3)
+    doc.add_heading('Tim Monitoring / Binpres:', level=3)
     petugas_list = [p.strip() for p in petugas_text.split('\n') if p.strip()]
     for i, p in enumerate(petugas_list, 1):
         doc.add_paragraph(f"{i}. {p}")
 
-    # Catatan Evaluasi
-    doc.add_heading('\nCatatan Evaluasi / Hasil Monitoring:', level=3)
+    doc.add_heading('\nCatatan Evaluasi / Progres Latihan:', level=3)
     doc.add_paragraph(catatan)
 
-    # DOKUMENTASI
     if fotos:
         doc.add_page_break()
-        head_doc = doc.add_heading('Lampiran Foto Dokumentasi', level=2)
+        head_doc = doc.add_heading('Lampiran Foto Dokumentasi Latihan', level=2)
         head_doc.alignment = WD_ALIGN_PARAGRAPH.CENTER
         doc.add_paragraph(f"Cabor: {cabor} | Tanggal: {tanggal}\n")
         
@@ -150,7 +143,7 @@ if 'logged_in' not in st.session_state:
 
 # --- HALAMAN LOGIN ---
 if not st.session_state['logged_in']:
-    st.markdown("<div class='main-header'>🏆 E-MONEV CABOR</div>", unsafe_allow_html=True)
+    st.markdown("<div class='main-header'>🏆 E-MONEV LATIHAN CABOR</div>", unsafe_allow_html=True)
     st.markdown("<div class='sub-header'>Binpres KONI Kabupaten Tangerang</div>", unsafe_allow_html=True)
     st.markdown("<br>", unsafe_allow_html=True)
     
@@ -175,15 +168,13 @@ if not st.session_state['logged_in']:
 
 # --- HALAMAN UTAMA (SETELAH LOGIN) ---
 else:
-    # Sidebar
-    st.sidebar.markdown("### 🏆 PANEL MONEV")
+    st.sidebar.markdown("### 🏆 PANEL MONEV LATIHAN")
     st.sidebar.caption("Binpres KONI Kab. Tangerang")
     st.sidebar.markdown(f"**🕒 Waktu Sistem:**\n*{get_current_time_id()}*")
     st.sidebar.markdown("---")
     
     st.sidebar.info(f"👤 **Login:** {st.session_state['username'].upper()}\n\n🛡️ **Role:** {st.session_state['role'].upper()}")
     
-    # Menu Navigasi Berdasarkan Role
     if st.session_state['role'] == 'admin':
         menu = ["📅 Kelola Jadwal (Admin)", "👥 Kelola User (Admin)", "📂 Arsip Laporan (Admin)", "📝 Coba Isi Laporan"]
         choice = st.sidebar.radio("📌 Navigasi Admin:", menu)
@@ -196,11 +187,9 @@ else:
         st.session_state.clear()
         st.rerun()
 
-    # ----------------------------------------------------
-    # HALAMAN UNTUK USER: FORM LAPORAN
-    # ----------------------------------------------------
+    # --- USER: FORM LAPORAN ---
     if choice in ["📝 Isi Form Laporan", "📝 Coba Isi Laporan"]:
-        st.markdown(f"### 📝 Form Laporan Monitoring")
+        st.markdown(f"### 📝 Form Laporan Monitoring Latihan")
         st.markdown(f"**Tanggal Hari Ini:** {get_current_time_id()}")
         st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
         
@@ -211,10 +200,10 @@ else:
         conn.close()
 
         if not schedules_data:
-            st.warning("⚠️ Belum ada jadwal monitoring yang tersedia. Harap hubungi Admin.")
+            st.warning("⚠️ Belum ada jadwal monitoring latihan yang tersedia. Harap hubungi Admin.")
         else:
             schedule_options = {f"{s[1]} | {s[2]} | {s[3]}": s for s in schedules_data}
-            selected_label = st.selectbox("📌 1. Pilih Jadwal Monitoring yang Tersedia", list(schedule_options.keys()))
+            selected_label = st.selectbox("📌 1. Pilih Jadwal Monitoring Latihan", list(schedule_options.keys()))
             selected_schedule = schedule_options[selected_label]
             
             val_cabor = selected_schedule[1]
@@ -222,14 +211,19 @@ else:
             val_tempat = selected_schedule[3]
 
             with st.container(border=True):
-                st.markdown("#### 📋 2. Detail Evaluasi & Dokumentasi")
+                st.markdown("#### 📋 2. Detail Evaluasi Latihan & Dokumentasi")
                 
-                petugas_text = st.text_area("👤 Daftar Petugas (Tulis 1 nama per baris)", 
+                petugas_text = st.text_area("👤 Daftar Tim Monitoring (Tulis 1 nama per baris)", 
                                             placeholder="Contoh:\nBudi Santoso\nAndi Saputra", height=100)
                 
-                catatan = st.text_area("✍️ Catatan Evaluasi / Hasil Monitoring", height=150)
+                # Input baru untuk Jumlah Atlet Hadir
+                jumlah_atlet = st.number_input("👥 Jumlah Atlet Hadir", min_value=0, value=0, step=1, 
+                                               help="Masukkan total atlet yang mengikuti sesi latihan")
                 
-                st.markdown("**📸 Upload Foto Bukti (Bebas 2 s/d 5 Foto)**")
+                catatan = st.text_area("✍️ Catatan Evaluasi / Progres Latihan", height=150, 
+                                       placeholder="Catat kelengkapan atlet, intensitas latihan, atau kendala di lapangan...")
+                
+                st.markdown("**📸 Upload Foto Bukti Latihan (Bebas 2 s/d 5 Foto)**")
                 fotos = st.file_uploader("Otomatis digabung jadi 1 halaman rapi di Word.", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
 
                 submit_laporan = st.button("📄 Generate & Simpan Laporan", use_container_width=True, type="primary")
@@ -238,19 +232,19 @@ else:
                 if not petugas_text.strip():
                     st.error("⚠️ Harap isi minimal 1 nama petugas!")
                 elif not catatan.strip():
-                    st.error("⚠️ Catatan evaluasi tidak boleh kosong!")
+                    st.error("⚠️ Catatan evaluasi latihan tidak boleh kosong!")
                 elif len(fotos) < 2:
-                    st.error("🚨 Minimal unggah 2 foto dokumentasi.")
+                    st.error("🚨 Minimal unggah 2 foto dokumentasi latihan.")
                 elif len(fotos) > 5:
                     st.error("🚨 Maksimal 5 foto dokumentasi agar muat 1 halaman.")
                 else:
-                    with st.spinner("⏳ Menyusun dokumen laporan & menyimpan ke server..."):
-                        word_file = generate_word_report(petugas_text, val_cabor, val_tanggal, val_tempat, catatan, fotos)
+                    with st.spinner("⏳ Menyusun dokumen laporan latihan & menyimpan ke server..."):
+                        # Memanggil fungsi dengan variabel baru: jumlah_atlet
+                        word_file = generate_word_report(petugas_text, val_cabor, val_tanggal, val_tempat, jumlah_atlet, catatan, fotos)
                         
                         safe_date_name = val_tanggal.replace(" s/d ", "_").replace("-", "").replace("/", "")
-                        file_name_doc = f"Monev_{val_cabor.split()[0]}_{safe_date_name}.docx"
+                        file_name_doc = f"Monev_Latihan_{val_cabor.split()[0]}_{safe_date_name}.docx"
                         
-                        # Simpan ke Database
                         file_bytes = word_file.getvalue()
                         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         
@@ -265,14 +259,13 @@ else:
                         st.session_state['word_file'] = word_file
                         st.session_state['file_name_doc'] = file_name_doc
                         
-                        # Update pesan WA (hanya memberitahu admin untuk cek aplikasi)
                         wa_number = "6285691860578"
-                        pesan = f"Halo Admin, Laporan Monitoring *{val_cabor}* (Tanggal Kegiatan: {val_tanggal}) telah selesai dibuat dan berhasil masuk ke sistem.\n\nSilakan login ke aplikasi dan buka menu *Arsip Laporan* untuk mengunduh dokumen."
+                        pesan = f"Halo Admin, Laporan Monitoring Latihan *{val_cabor}* (Tanggal: {val_tanggal}) telah selesai dibuat dan berhasil masuk ke sistem.\n\nSilakan login ke aplikasi dan buka menu *Arsip Laporan* untuk mengunduh dokumen."
                         wa_link = f"https://wa.me/{wa_number}?text={urllib.parse.quote(pesan)}"
                         st.session_state['wa_link'] = wa_link
             
             if st.session_state.get('report_generated', False):
-                st.success("🎉 **Laporan Berhasil Disimpan di Sistem!** (Berlaku 30 Hari)")
+                st.success("🎉 **Laporan Latihan Berhasil Disimpan di Sistem!** (Berlaku 30 Hari)")
                 colA, colB = st.columns(2)
                 
                 with colA:
@@ -289,26 +282,22 @@ else:
                                    use_container_width=True)
                     st.caption("*(Kirim pesan teks ini agar Admin tahu laporan sudah siap diunduh)*")
 
-    # ----------------------------------------------------
-    # MENU ADMIN: ARSIP LAPORAN
-    # ----------------------------------------------------
+    # --- ADMIN: ARSIP LAPORAN ---
     elif choice == "📂 Arsip Laporan (Admin)":
-        st.markdown(f"### 📂 Arsip Laporan Tersimpan")
+        st.markdown(f"### 📂 Arsip Laporan Latihan Tersimpan")
         st.markdown("⚠️ *Laporan yang berusia lebih dari 30 hari akan otomatis terhapus oleh sistem.*")
         st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
 
         conn = sqlite3.connect(DB_NAME)
-        # Ambil metadata laporan saja (tanpa file_data agar tidak berat diload ke dataframe)
-        reports_df = pd.read_sql_query("SELECT id as ID, cabor as Cabor, tanggal_kegiatan as 'Tgl Kegiatan', submit_time as 'Waktu Submit', file_name as 'Nama File' FROM reports ORDER BY submit_time DESC", conn)
+        reports_df = pd.read_sql_query("SELECT id as ID, cabor as Cabor, tanggal_kegiatan as 'Tgl Latihan', submit_time as 'Waktu Submit', file_name as 'Nama File' FROM reports ORDER BY submit_time DESC", conn)
         
         if reports_df.empty:
-            st.info("Belum ada laporan yang di-submit dan tersimpan di sistem saat ini.")
+            st.info("Belum ada laporan latihan yang di-submit dan tersimpan di sistem saat ini.")
             conn.close()
         else:
             st.dataframe(reports_df, use_container_width=True, hide_index=True)
             
             col_dl, col_del = st.columns(2)
-            
             with col_dl:
                 with st.container(border=True):
                     st.markdown("#### 📥 Unduh Laporan")
@@ -343,11 +332,9 @@ else:
                         st.rerun()
             conn.close()
 
-    # ----------------------------------------------------
-    # MENU ADMIN: KELOLA JADWAL
-    # ----------------------------------------------------
+    # --- ADMIN: KELOLA JADWAL ---
     elif choice == "📅 Kelola Jadwal (Admin)":
-        st.markdown(f"### 📅 Kelola Jadwal Monitoring")
+        st.markdown(f"### 📅 Kelola Jadwal Monitoring Latihan")
         st.markdown(f"**Waktu Saat Ini:** {get_current_time_id()}")
         st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
         
@@ -384,9 +371,8 @@ else:
         
         with col_form:
             with st.container(border=True):
-                st.subheader("➕ Tambah Jadwal Baru")
+                st.subheader("➕ Tambah Jadwal Latihan")
                 with st.form("form_jadwal"):
-                    
                     selected_cabor_option = st.selectbox("Pilih Cabang Olahraga", combined_cabor)
                     
                     if selected_cabor_option == "➕ LAINNYA (Tambah Baru)":
@@ -395,12 +381,11 @@ else:
                         custom_cabor = "" 
                         
                     new_tanggal = st.date_input(
-                        "Tanggal Kegiatan (Bisa pilih satu hari atau rentang hari)", 
+                        "Tanggal Latihan (Bisa pilih satu hari atau rentang hari)", 
                         value=(datetime.date.today(), datetime.date.today())
                     )
                     
-                    new_tempat = st.text_input("Tempat / Lokasi")
-                    
+                    new_tempat = st.text_input("Tempat / Lokasi Latihan")
                     submit_jadwal = st.form_submit_button("Simpan Jadwal", use_container_width=True)
                     
                     if submit_jadwal:
@@ -437,9 +422,9 @@ else:
                         
         with col_data:
             with st.container(border=True):
-                st.subheader("📋 Daftar Jadwal Aktif")
+                st.subheader("📋 Daftar Jadwal Latihan Aktif")
                 conn = sqlite3.connect(DB_NAME)
-                jadwal_df = pd.read_sql_query("SELECT id as ID, cabor as Cabor, tanggal as Tanggal, tempat as Tempat FROM schedules", conn)
+                jadwal_df = pd.read_sql_query("SELECT id as ID, cabor as Cabor, tanggal as Tanggal, tempat as 'Tempat Latihan' FROM schedules", conn)
                 conn.close()
                 
                 if jadwal_df.empty:
@@ -457,9 +442,7 @@ else:
                             st.success("Jadwal berhasil dihapus!")
                             st.rerun()
 
-    # ----------------------------------------------------
-    # MENU ADMIN: KELOLA USER
-    # ----------------------------------------------------
+    # --- ADMIN: KELOLA USER ---
     elif choice == "👥 Kelola User (Admin)":
         st.markdown(f"### 👥 Manajemen Pengguna")
         st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
