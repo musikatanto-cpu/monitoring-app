@@ -10,7 +10,7 @@ Fitur:
 - Filter laporan (cabor, status, tanggal, keyword)
 - Detail laporan + preview foto
 - Export Word (satuan & rekap, foto ikut) + Export Excel
-- Laporan Saya (petugas): lihat status, detail, download Word
+- Laporan Saya (petugas): lihat status, detail, download Word di setiap laporan
 - Hapus laporan (admin)
 - Manajemen user & cabor
 - Download Word oleh user + arsip otomatis ke Google Drive
@@ -1661,6 +1661,9 @@ def form_input_monitoring() -> None:
                 # Otomatis buat Word dan arsipkan ke Google Drive.
                 ok_drive, msg_drive, drive_url = upload_or_update_drive_report(int(laporan_id))
 
+                # Simpan ID laporan terakhir agar bisa langsung diunduh
+                st.session_state["last_saved_laporan_id"] = int(laporan_id)
+
                 msg = f"✅ Laporan berhasil disimpan (ID: {laporan_id})."
                 if n_foto:
                     msg += f" **{n_foto} foto** ikut tersimpan dan akan muncul di file Word."
@@ -1682,13 +1685,32 @@ def form_input_monitoring() -> None:
                     "Cek tab **Laporan Saya** untuk melihat status, membuka arsip Drive, atau mengunduh Word."
                 )
 
+    # --- Tombol Download Word langsung setelah simpan (di luar form) ---
+    last_id = st.session_state.get("last_saved_laporan_id")
+    if last_id:
+        row_last = get_laporan_by_id(int(last_id))
+        if row_last:
+            st.markdown("---")
+            st.markdown("### ⬇️ Download Laporan yang Baru Disimpan")
+            word_file = generate_word_report([dict(row_last)], is_all=False, include_photos=True)
+            st.download_button(
+                label="⬇️ Download Word Laporan Ini (termasuk foto)",
+                data=word_file,
+                file_name=f"Laporan_{row_last['cabor']}_{row_last['tanggal']}.docx",
+                mime=WORD_MIME,
+                use_container_width=True,
+                type="primary",
+                key=f"dl_after_save_{last_id}",
+            )
+            st.caption("File Word berisi isi lengkap laporan + dokumentasi foto (jika ada).")
+
 
 def halaman_laporan_saya() -> None:
     st.markdown(
         """
         <div class="main-header">
             <h1>📂 Laporan Saya</h1>
-            <p>Daftar laporan yang pernah Anda input — unduh & lihat status</p>
+            <p>Daftar laporan yang pernah Anda input — unduh Word di setiap laporan</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1720,10 +1742,10 @@ def halaman_laporan_saya() -> None:
     st.dataframe(df, use_container_width=True, hide_index=True)
 
     st.markdown("---")
-    st.markdown("### 📥 Detail & Download")
+    st.markdown("### 📥 Detail & Download Word per Laporan")
 
     pilihan_id = st.selectbox(
-        "Pilih laporan",
+        "Pilih laporan untuk diunduh / dilihat detail",
         df["id"].tolist(),
         format_func=lambda x: (
             f"ID {x} — {df.loc[df['id']==x, 'cabor'].values[0]} "
@@ -1740,6 +1762,20 @@ def halaman_laporan_saya() -> None:
 
     with st.expander("📋 Lihat Detail Lengkap", expanded=True):
         render_detail_laporan(row)
+
+    # --- Download Word selalu tersedia di setiap laporan ---
+    st.markdown("### ⬇️ Download File Word")
+    word_file = generate_word_report([dict(row)], is_all=False, include_photos=True)
+    st.download_button(
+        label="⬇️ Download Laporan Word (termasuk foto)",
+        data=word_file,
+        file_name=f"Laporan_{row['cabor']}_{row['tanggal']}.docx",
+        mime=WORD_MIME,
+        use_container_width=True,
+        type="primary",
+        key=f"user_dl_word_{row['id']}",
+    )
+    st.caption("File berisi data lengkap + dokumentasi foto (jika ada).")
 
     st.markdown("### ☁️ Arsip Google Drive")
     if row["drive_url"]:
@@ -1764,16 +1800,6 @@ def halaman_laporan_saya() -> None:
                 st.rerun()
             else:
                 st.error(msg)
-
-    word_file = generate_word_report([dict(row)], is_all=False)
-    st.download_button(
-        label="⬇️ Download Laporan Word (termasuk foto)",
-        data=word_file,
-        file_name=f"Laporan_{row['cabor']}_{row['tanggal']}.docx",
-        mime=WORD_MIME,
-        use_container_width=True,
-        type="primary",
-    )
 
 
 def halaman_user() -> None:
