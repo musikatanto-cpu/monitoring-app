@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import streamlit as st
 import datetime
-import sqlite3
 import hashlib
+import os
 import uuid
 import re
 from io import BytesIO
@@ -17,6 +17,7 @@ from docx import Document
 from docx.shared import Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from PIL import Image, ImageDraw, ImageFont
+from supabase import create_client, Client
 
 
 # ============================================================
@@ -29,9 +30,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-DB_NAME = "monitoring.db"
-UPLOAD_DIR = Path("uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
 
 # ============================================================
 # KONFIGURASI FOTO & WORD
@@ -163,13 +161,21 @@ CUSTOM_CSS = """
 
 
 # ============================================================
-# DATABASE
+# SUPABASE CONFIGURATION & BACKEND
 # ============================================================
-def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+SUPABASE_BUCKET = "monitoring-binpres"
+SUPABASE_URL_KEY = "SUPABASE_URL"
+SUPABASE_SERVICE_KEY = "SUPABASE_SECRET_KEY"
+
+
+def _get_secret(name: str) -> str:
+    try:
+        value = st.secrets.get(name)
+    except Exception:
+        value = None
+    if value:
+        return str(value).strip()
+    return os.getenv(name, "").strip()
 
 
 def hash_password(password: str) -> str:
@@ -180,240 +186,191 @@ def verify_password(password: str, stored: str) -> bool:
     return hash_password(password) == stored or password == stored
 
 
-def _add_column_if_missing(cursor: sqlite3.Cursor, table: str, column: str, definition: str) -> None:
-    existing = [r["name"] for r in cursor.execute(f"PRAGMA table_info({table})").fetchall()]
-    if column not in existing:
-        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-
-
-def init_db() -> None:
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            role TEXT NOT NULL DEFAULT 'user',
-            nama_lengkap TEXT DEFAULT '',
-            aktif INTEGER DEFAULT 1,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+@st.cache_resource(show_spinner=False)
+def get_supabase() -> Client:
+    """Client Supabase server-side. Jangan pernah menampilkan service-role key ke user."""
+    url = _get_secret(SUPABASE_URL_KEY)
+    key = _get_secret(SUPABASE_SERVICE_KEY) or _get_secret("SUPABASE_SERVICE_ROLE_KEY") or _get_secret("SUPABASE_KEY")
+    if not url or not key:
+        raise RuntimeError(
+            "SUPABASE_URL dan SUPABASE_SECRET_KEY belum diisi di Streamlit Secrets."
         )
-    """)
+    return create_client(url, key)
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS cabor (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nama TEXT UNIQUE NOT NULL,
-            aktif INTEGER DEFAULT 1
-        )
-    """)
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS laporan_monitoring (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            tanggal DATE,
-            cabor TEXT,
-            lokasi TEXT,
-            petugas TEXT,
-            fisik_parameter TEXT,
-            fisik_peaking TEXT,
-            fisik_recovery TEXT,
-            fisik_cedera TEXT,
-            taktis_lawan TEXT,
-            taktis_instruksi TEXT,
-            taktis_ujicoba TEXT,
-            mental_cemas TEXT,
-            mental_fokus TEXT,
-            mental_rutinitas TEXT,
-            mental_psikolog TEXT,
-            nutrisi_bb TEXT,
-            nutrisi_asupan TEXT,
-            nutrisi_hidrasi TEXT,
-            nutrisi_tidur TEXT,
-            medis_rekam TEXT,
-            medis_doping TEXT,
-            medis_alat TEXT,
-            medis_nonteknis TEXT,
-            status TEXT DEFAULT 'Belum Ditindaklanjuti',
-            catatan_admin TEXT DEFAULT '',
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+def _sb_data(response) -> list:
+    data = getattr(response, "data", None)
+    if data is None:
+        return []
+    return data if isinstance(data, list) else [data]
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS laporan_foto (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            laporan_id INTEGER NOT NULL,
-            filename TEXT NOT NULL,
-            original_name TEXT,
-            mime_type TEXT DEFAULT 'image/jpeg',
-            data BLOB,
-            uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (laporan_id) REFERENCES laporan_monitoring(id) ON DELETE CASCADE
-        )
-    """)
 
-    for col, defn in {
-        "nama_lengkap": "TEXT DEFAULT ''",
-        "aktif": "INTEGER DEFAULT 1",
-        "created_at": "TEXT DEFAULT CURRENT_TIMESTAMP",
-    }.items():
-        _add_column_if_missing(cur, "users", col, defn)
+def safe_filename(value: str) -> str:
+    value = str(value or "").strip()
+    value = re.sub(r'[\\/:*?"<>|]+', "-", value)
+    value = re.sub(r"\s+", " ", value)
+    return value[:180] or "Laporan_Monitoring"
 
-    for col, defn in {
-        "status": "TEXT DEFAULT 'Belum Ditindaklanjuti'",
-        "catatan_admin": "TEXT DEFAULT ''",
-        "updated_at": "TEXT DEFAULT CURRENT_TIMESTAMP",
-        "created_at": "TEXT DEFAULT CURRENT_TIMESTAMP",
-        "daftar_hadir_koni": "TEXT DEFAULT ''",
-    }.items():
-        _add_column_if_missing(cur, "laporan_monitoring", col, defn)
 
-    for col, defn in {
-        "mime_type": "TEXT DEFAULT 'image/jpeg'",
-        "data": "BLOB",
-        "timestamp_mark": "TEXT DEFAULT ''",
-    }.items():
-        _add_column_if_missing(cur, "laporan_foto", col, defn)
+def _now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-    # Akun utama wajib untuk akses sistem
-    userkoni = cur.execute(
-        "SELECT id FROM users WHERE username = ?", ("userkoni",)
-    ).fetchone()
-    if userkoni:
-        cur.execute(
-            "UPDATE users SET password=?, role=?, nama_lengkap=?, aktif=1 WHERE id=?",
-            (hash_password("koni123"), "admin", "User KONI", userkoni["id"]),
-        )
-    else:
-        cur.execute(
-            """INSERT INTO users (username, password, role, nama_lengkap, aktif)
-               VALUES (?, ?, ?, ?, 1)""",
-            ("userkoni", hash_password("koni123"), "admin", "User KONI"),
-        )
 
-    # Akun lama tetap dipertahankan bila sudah ada, tetapi akun utama sistem adalah userkoni.
-    for username, old_pw, role, nama in [
-        ("admin", "admin123", "admin", "Administrator"),
-        ("petugas", "petugas123", "user", "Petugas Monitoring"),
-    ]:
-        row = cur.execute(
-            "SELECT id, password FROM users WHERE username = ?", (username,)
-        ).fetchone()
-        if row and row["password"] == old_pw:
-            cur.execute(
-                "UPDATE users SET password=?, role=?, nama_lengkap=? WHERE id=?",
-                (hash_password(old_pw), role, nama, row["id"]),
+def ensure_storage_bucket() -> None:
+    """Buat bucket private jika belum ada. Gunakan service-role key di server."""
+    sb = get_supabase()
+    try:
+        buckets = sb.storage.list_buckets() or []
+        names = set()
+        for bucket in buckets:
+            if isinstance(bucket, dict):
+                names.add(bucket.get("id"))
+                names.add(bucket.get("name"))
+            else:
+                names.add(getattr(bucket, "id", None))
+                names.add(getattr(bucket, "name", None))
+        if SUPABASE_BUCKET not in names:
+            sb.storage.create_bucket(
+                SUPABASE_BUCKET,
+                options={
+                    "public": False,
+                    "allowed_mime_types": ["image/jpeg", "image/png", "image/webp"],
+                    "file_size_limit": MAX_PHOTO_MB * 1024 * 1024,
+                },
             )
-
-    if cur.execute("SELECT COUNT(*) AS n FROM cabor").fetchone()["n"] == 0:
-        cur.executemany(
-            "INSERT OR IGNORE INTO cabor (nama) VALUES (?)",
-            [(n,) for n in DEFAULT_CABOR],
+    except Exception as exc:
+        st.warning(
+            f"Bucket Storage '{SUPABASE_BUCKET}' belum dapat dibuat/diperiksa otomatis. "
+            f"Pastikan bucket tersebut tersedia di Supabase. Detail: {exc}"
         )
 
-    conn.commit()
-    conn.close()
+
+def init_backend() -> None:
+    """Validasi struktur tabel, seed akun utama dan cabor."""
+    try:
+        sb = get_supabase()
+        # Validasi tabel utama.
+        for table in ("users", "cabor", "laporan_monitoring", "laporan_foto"):
+            sb.table(table).select("id").limit(1).execute()
+
+        # Akun wajib: userkoni / koni123.
+        found = _sb_data(
+            sb.table("users").select("id").eq("username", "userkoni").limit(1).execute()
+        )
+        payload = {
+            "username": "userkoni",
+            "password": hash_password("koni123"),
+            "role": "admin",
+            "nama_lengkap": "User KONI",
+            "aktif": True,
+        }
+        if found:
+            sb.table("users").update(payload).eq("id", int(found[0]["id"])).execute()
+        else:
+            sb.table("users").insert(payload).execute()
+
+        # Seed cabang olahraga bila kosong.
+        cabor_exists = _sb_data(sb.table("cabor").select("id").limit(1).execute())
+        if not cabor_exists:
+            sb.table("cabor").insert(
+                [{"nama": n, "aktif": True} for n in DEFAULT_CABOR]
+            ).execute()
+
+        ensure_storage_bucket()
+    except Exception as exc:
+        st.error("Supabase belum siap digunakan.")
+        st.code(str(exc))
+        st.info(
+            "1) Jalankan supabase_schema.sql di Supabase SQL Editor. "
+            "2) Isi SUPABASE_URL dan SUPABASE_SECRET_KEY di Streamlit Secrets. "
+            "3) Pastikan bucket monitoring-binpres tersedia."
+        )
+        st.stop()
 
 
-# ============================================================
-# HELPER / QUERY
-# ============================================================
 def logout() -> None:
     for key in list(st.session_state.keys()):
         del st.session_state[key]
     st.rerun()
 
-
+# ============================================================
+# HELPER / QUERY
+# ============================================================
 def get_cabor_list() -> List[str]:
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT nama FROM cabor WHERE aktif=1 ORDER BY nama"
-        ).fetchall()
+    rows = _sb_data(
+        get_supabase().table("cabor").select("nama").eq("aktif", True).order("nama").execute()
+    )
     return [r["nama"] for r in rows]
 
 
-def get_current_user() -> Optional[sqlite3.Row]:
+def get_current_user() -> Optional[dict]:
     username = st.session_state.get("username")
     if not username:
         return None
-    with get_conn() as conn:
-        return conn.execute(
-            "SELECT * FROM users WHERE username=?", (username,)
-        ).fetchone()
+    rows = _sb_data(
+        get_supabase().table("users").select("*").eq("username", username).limit(1).execute()
+    )
+    return rows[0] if rows else None
 
 
 def fetch_all_users() -> pd.DataFrame:
-    with get_conn() as conn:
-        return pd.read_sql_query(
-            """SELECT id, username, nama_lengkap, role,
-                      CASE WHEN aktif=1 THEN 'Aktif' ELSE 'Nonaktif' END AS status,
-                      created_at
-               FROM users ORDER BY id DESC""",
-            conn,
-        )
+    rows = _sb_data(
+        get_supabase().table("users").select("id,username,nama_lengkap,role,aktif,created_at")
+        .order("id", desc=True).execute()
+    )
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return pd.DataFrame(columns=["id", "username", "nama_lengkap", "role", "status", "created_at"])
+    df["status"] = df["aktif"].map({True: "Aktif", False: "Nonaktif"})
+    return df[["id", "username", "nama_lengkap", "role", "status", "created_at"]]
 
 
 def fetch_all_cabor() -> pd.DataFrame:
-    with get_conn() as conn:
-        return pd.read_sql_query(
-            """SELECT id, nama,
-                      CASE WHEN aktif=1 THEN 'Aktif' ELSE 'Nonaktif' END AS status
-               FROM cabor ORDER BY nama""",
-            conn,
-        )
+    rows = _sb_data(get_supabase().table("cabor").select("id,nama,aktif").order("nama").execute())
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return pd.DataFrame(columns=["id", "nama", "status"])
+    df["status"] = df["aktif"].map({True: "Aktif", False: "Nonaktif"})
+    return df[["id", "nama", "status"]]
+
+
+def _all_laporan_rows() -> List[dict]:
+    return _sb_data(
+        get_supabase().table("laporan_monitoring").select("*")
+        .order("tanggal", desc=True).order("id", desc=True).execute()
+    )
 
 
 def fetch_laporan_summary() -> Dict[str, int]:
-    with get_conn() as conn:
-        total = conn.execute("SELECT COUNT(*) AS n FROM laporan_monitoring").fetchone()["n"]
-        bulan_ini = conn.execute(
-            """SELECT COUNT(*) AS n FROM laporan_monitoring
-               WHERE strftime('%Y-%m', tanggal)=strftime('%Y-%m','now')"""
-        ).fetchone()["n"]
-        cabor_termonitor = conn.execute(
-            "SELECT COUNT(DISTINCT cabor) AS n FROM laporan_monitoring"
-        ).fetchone()["n"]
-        perlu_tindak = conn.execute(
-            """SELECT COUNT(*) AS n FROM laporan_monitoring
-               WHERE status=? OR status IS NULL""",
-            (DEFAULT_STATUS,),
-        ).fetchone()["n"]
-        selesai = conn.execute(
-            "SELECT COUNT(*) AS n FROM laporan_monitoring WHERE status='Selesai'"
-        ).fetchone()["n"]
+    rows = _all_laporan_rows()
+    total = len(rows)
+    bulan_ini = datetime.date.today().strftime("%Y-%m")
     return {
         "total": total,
-        "bulan_ini": bulan_ini,
-        "cabor_termonitor": cabor_termonitor,
-        "perlu_tindak": perlu_tindak,
-        "selesai": selesai,
+        "bulan_ini": sum(str(r.get("tanggal", ""))[:7] == bulan_ini for r in rows),
+        "cabor_termonitor": len({r.get("cabor") for r in rows if r.get("cabor")}),
+        "perlu_tindak": sum((r.get("status") or DEFAULT_STATUS) == DEFAULT_STATUS for r in rows),
+        "selesai": sum((r.get("status") or "") == "Selesai" for r in rows),
     }
 
 
 def fetch_chart_data():
-    with get_conn() as conn:
-        by_cabor = pd.read_sql_query(
-            """SELECT cabor, COUNT(*) AS jumlah
-               FROM laporan_monitoring
-               GROUP BY cabor ORDER BY jumlah DESC LIMIT 15""",
-            conn,
+    rows = _all_laporan_rows()
+    if not rows:
+        return (
+            pd.DataFrame(columns=["cabor", "jumlah"]),
+            pd.DataFrame(columns=["bulan", "jumlah"]),
+            pd.DataFrame(columns=["status", "jumlah"]),
         )
-        by_month = pd.read_sql_query(
-            """SELECT strftime('%Y-%m', tanggal) AS bulan, COUNT(*) AS jumlah
-               FROM laporan_monitoring
-               WHERE tanggal IS NOT NULL
-               GROUP BY bulan ORDER BY bulan""",
-            conn,
-        )
-        by_status = pd.read_sql_query(
-            """SELECT COALESCE(status, 'Belum Ditindaklanjuti') AS status, COUNT(*) AS jumlah
-               FROM laporan_monitoring GROUP BY status""",
-            conn,
-        )
+    df = pd.DataFrame(rows)
+    by_cabor = (
+        df.dropna(subset=["cabor"]).groupby("cabor").size().reset_index(name="jumlah")
+        .sort_values("jumlah", ascending=False).head(15)
+    )
+    df["bulan"] = df["tanggal"].fillna("").astype(str).str[:7]
+    by_month = df[df["bulan"].ne("")].groupby("bulan").size().reset_index(name="jumlah").sort_values("bulan")
+    df["status"] = df["status"].fillna(DEFAULT_STATUS)
+    by_status = df.groupby("status").size().reset_index(name="jumlah")
     return by_cabor, by_month, by_status
 
 
@@ -425,82 +382,59 @@ def fetch_laporan_list(
     tgl_akhir: Optional[datetime.date] = None,
     keyword: Optional[str] = None,
 ) -> pd.DataFrame:
-    clauses = []
-    params: list = []
-
+    rows = _all_laporan_rows()
+    columns = ["id", "tanggal", "cabor", "lokasi", "petugas", "status", "updated_at"]
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return pd.DataFrame(columns=columns)
     if petugas:
-        clauses.append("petugas = ?")
-        params.append(petugas)
+        df = df[df["petugas"].fillna("").eq(petugas)]
     if cabor and cabor != "Semua":
-        clauses.append("cabor = ?")
-        params.append(cabor)
+        df = df[df["cabor"].fillna("").eq(cabor)]
     if status and status != "Semua":
-        clauses.append("COALESCE(status, ?) = ?")
-        params.extend([DEFAULT_STATUS, status])
+        df = df[df["status"].fillna(DEFAULT_STATUS).eq(status)]
     if tgl_awal:
-        clauses.append("tanggal >= ?")
-        params.append(str(tgl_awal))
+        df = df[df["tanggal"].astype(str).ge(str(tgl_awal))]
     if tgl_akhir:
-        clauses.append("tanggal <= ?")
-        params.append(str(tgl_akhir))
+        df = df[df["tanggal"].astype(str).le(str(tgl_akhir))]
     if keyword:
-        clauses.append("(lokasi LIKE ? OR petugas LIKE ? OR cabor LIKE ?)")
-        kw = f"%{keyword}%"
-        params.extend([kw, kw, kw])
-
-    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-    sql = f"""
-        SELECT id, tanggal, cabor, lokasi, petugas,
-               COALESCE(status, '{DEFAULT_STATUS}') AS status,
-               updated_at
-        FROM laporan_monitoring
-        {where}
-        ORDER BY tanggal DESC, id DESC
-    """
-    with get_conn() as conn:
-        return pd.read_sql_query(sql, conn, params=params)
+        kw = keyword.lower()
+        mask = (
+            df["lokasi"].fillna("").str.lower().str.contains(kw, regex=False)
+            | df["petugas"].fillna("").str.lower().str.contains(kw, regex=False)
+            | df["cabor"].fillna("").str.lower().str.contains(kw, regex=False)
+        )
+        df = df[mask]
+    df["status"] = df["status"].fillna(DEFAULT_STATUS)
+    return df[columns].sort_values(["tanggal", "id"], ascending=[False, False]).reset_index(drop=True)
 
 
-def get_laporan_by_id(laporan_id: int) -> Optional[sqlite3.Row]:
-    with get_conn() as conn:
-        return conn.execute(
-            "SELECT * FROM laporan_monitoring WHERE id=?", (laporan_id,)
-        ).fetchone()
+def get_laporan_by_id(laporan_id: int) -> Optional[dict]:
+    rows = _sb_data(get_supabase().table("laporan_monitoring").select("*").eq("id", int(laporan_id)).limit(1).execute())
+    return rows[0] if rows else None
 
 
-def get_fotos_by_laporan(laporan_id: int) -> List[sqlite3.Row]:
-    with get_conn() as conn:
-        return conn.execute(
-            "SELECT * FROM laporan_foto WHERE laporan_id=? ORDER BY id",
-            (laporan_id,),
-        ).fetchall()
+def get_fotos_by_laporan(laporan_id: int) -> List[dict]:
+    return _sb_data(
+        get_supabase().table("laporan_foto").select("*").eq("laporan_id", int(laporan_id)).order("id").execute()
+    )
 
 
 def _mime_from_ext(ext: str) -> str:
-    return {
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".png": "image/png",
-        ".webp": "image/webp",
-    }.get(ext.lower(), "image/jpeg")
+    return {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}.get(ext.lower(), "image/jpeg")
 
 
-def get_foto_bytes(foto: sqlite3.Row) -> Optional[bytes]:
-    """Prioritaskan BLOB di DB, fallback ke file disk."""
+def get_foto_bytes(foto: dict) -> Optional[bytes]:
+    path = foto.get("storage_path") or ""
+    if not path:
+        return None
     try:
-        blob = foto["data"]
-        if blob:
-            return bytes(blob)
-    except (IndexError, KeyError):
-        pass
-    path = UPLOAD_DIR / foto["filename"]
-    if path.exists():
-        return path.read_bytes()
-    return None
+        return get_supabase().storage.from_(SUPABASE_BUCKET).download(path)
+    except Exception:
+        return None
 
 
 def _load_font(size: int = 24):
-    """Font aman: DejaVu jika tersedia, fallback default PIL."""
     candidates = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -515,31 +449,26 @@ def _load_font(size: int = 24):
 
 
 def add_timestamp_watermark(raw: bytes, timestamp_text: str) -> bytes:
-    """Tambahkan time-mark server ke foto sebelum disimpan."""
     try:
         img = Image.open(BytesIO(raw)).convert("RGB")
         max_side = 2400
         if max(img.size) > max_side:
             img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
-
         draw = ImageDraw.Draw(img, "RGBA")
         font_size = max(18, int(min(img.size) * 0.025))
         font = _load_font(font_size)
         text = f"MONITORING BINPRES | {timestamp_text}"
         bbox = draw.textbbox((0, 0), text, font=font)
-        tw = bbox[2] - bbox[0]
-        th = bbox[3] - bbox[1]
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
         margin = max(12, int(font_size * 0.6))
         x = margin
         y = img.height - th - margin * 2
-
         draw.rounded_rectangle(
             (x - margin, y - margin, x + tw + margin, y + th + margin),
             radius=10,
             fill=(0, 0, 0, 155),
         )
         draw.text((x, y), text, font=font, fill=(255, 255, 255, 235))
-
         out = BytesIO()
         img.save(out, format="JPEG", quality=92, optimize=True)
         return out.getvalue()
@@ -548,65 +477,56 @@ def add_timestamp_watermark(raw: bytes, timestamp_text: str) -> bytes:
 
 
 def save_uploaded_photos(laporan_id: int, uploaded_files: list) -> int:
-    """Simpan foto bertimestamp ke disk + BLOB di database."""
     if not uploaded_files:
         return 0
-
     count = 0
-    now_text = datetime.datetime.now().strftime(PHOTO_TIMESTAMP_FORMAT)
-
-    with get_conn() as conn:
-        for f in uploaded_files[:MAX_PHOTOS_PER_REPORT]:
-            ext = Path(f.name).suffix.lower()
-            if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
-                continue
-
-            raw = f.getbuffer().tobytes()
-            if not raw or len(raw) > MAX_PHOTO_MB * 1024 * 1024:
-                continue
-
-            marked = add_timestamp_watermark(raw, now_text)
-            unique_name = f"{laporan_id}_{uuid.uuid4().hex[:10]}.jpg"
-
-            try:
-                dest = UPLOAD_DIR / unique_name
-                with open(dest, "wb") as out:
-                    out.write(marked)
-            except OSError:
-                pass
-
-            conn.execute(
-                """INSERT INTO laporan_foto
-                   (laporan_id, filename, original_name, mime_type, data, timestamp_mark)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (
-                    laporan_id,
-                    unique_name,
-                    f.name,
-                    "image/jpeg",
-                    marked,
-                    now_text,
-                ),
+    sb = get_supabase()
+    for f in uploaded_files[:MAX_PHOTOS_PER_REPORT]:
+        ext = Path(f.name).suffix.lower()
+        if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
+            continue
+        raw = f.getbuffer().tobytes()
+        if not raw:
+            continue
+        timestamp_text = datetime.datetime.now().strftime(PHOTO_TIMESTAMP_FORMAT)
+        processed = add_timestamp_watermark(raw, timestamp_text)
+        stem = safe_filename(Path(f.name).stem).replace(" ", "_")
+        storage_path = f"laporan/{laporan_id}/{uuid.uuid4().hex}_{stem}.jpg"
+        try:
+            sb.storage.from_(SUPABASE_BUCKET).upload(
+                storage_path,
+                processed,
+                {"content-type": "image/jpeg", "cache-control": "3600", "upsert": "false"},
             )
+            sb.table("laporan_foto").insert({
+                "laporan_id": int(laporan_id),
+                "filename": Path(storage_path).name,
+                "original_name": f.name,
+                "mime_type": "image/jpeg",
+                "storage_path": storage_path,
+                "timestamp_mark": timestamp_text,
+            }).execute()
             count += 1
-
-        conn.commit()
+        except Exception as exc:
+            try:
+                sb.storage.from_(SUPABASE_BUCKET).remove([storage_path])
+            except Exception:
+                pass
+            st.warning(f"Foto '{f.name}' gagal disimpan: {exc}")
     return count
 
 
 def delete_laporan(laporan_id: int) -> None:
+    sb = get_supabase()
     fotos = get_fotos_by_laporan(laporan_id)
-    for f in fotos:
-        path = UPLOAD_DIR / f["filename"]
-        if path.exists():
-            try:
-                path.unlink()
-            except OSError:
-                pass
-    with get_conn() as conn:
-        conn.execute("DELETE FROM laporan_foto WHERE laporan_id=?", (laporan_id,))
-        conn.execute("DELETE FROM laporan_monitoring WHERE id=?", (laporan_id,))
-        conn.commit()
+    paths = [f.get("storage_path") for f in fotos if f.get("storage_path")]
+    if paths:
+        try:
+            sb.storage.from_(SUPABASE_BUCKET).remove(paths)
+        except Exception:
+            pass
+    sb.table("laporan_foto").delete().eq("laporan_id", int(laporan_id)).execute()
+    sb.table("laporan_monitoring").delete().eq("id", int(laporan_id)).execute()
 
 
 def status_badge_html(status: str) -> str:
@@ -618,7 +538,6 @@ def status_badge_html(status: str) -> str:
     else:
         cls = "badge-belum"
     return f'<span class="{cls}">{s}</span>'
-
 
 # ============================================================
 # WORD & EXCEL EXPORT
@@ -813,58 +732,28 @@ def generate_excel_report(df: pd.DataFrame) -> bytes:
         out = BytesIO()
         pd.DataFrame({"info": ["Tidak ada data"]}).to_excel(out, index=False)
         return out.getvalue()
-
-    ids = df["id"].tolist()
-    placeholders = ",".join("?" * len(ids))
-    with get_conn() as conn:
-        detail = pd.read_sql_query(
-            f"""SELECT * FROM laporan_monitoring
-                WHERE id IN ({placeholders})
-                ORDER BY tanggal DESC, id DESC""",
-            conn,
-            params=ids,
-        )
-
+    rows = []
+    for laporan_id in [int(x) for x in df["id"].tolist()]:
+        row = get_laporan_by_id(laporan_id)
+        if row:
+            rows.append(row)
+    detail = pd.DataFrame(rows)
     rename_map = {
-        "id": "ID",
-        "tanggal": "Tanggal",
-        "cabor": "Cabang Olahraga",
-        "lokasi": "Lokasi",
-        "petugas": "Petugas",
-        "status": "Status",
-        "catatan_admin": "Catatan Admin",
-        "daftar_hadir_koni": "Daftar Hadir Perwakilan KONI",
-        "fisik_parameter": "Fisik - Parameter",
-        "fisik_peaking": "Fisik - Peaking",
-        "fisik_recovery": "Fisik - Recovery",
-        "fisik_cedera": "Fisik - Cedera",
-        "taktis_lawan": "Taktis - Lawan",
-        "taktis_instruksi": "Taktis - Instruksi",
-        "taktis_ujicoba": "Taktis - Ujicoba",
-        "mental_cemas": "Mental - Cemas",
-        "mental_fokus": "Mental - Fokus",
-        "mental_rutinitas": "Mental - Rutinitas",
-        "mental_psikolog": "Mental - Psikolog",
-        "nutrisi_bb": "Nutrisi - BB",
-        "nutrisi_asupan": "Nutrisi - Asupan",
-        "nutrisi_hidrasi": "Nutrisi - Hidrasi",
-        "nutrisi_tidur": "Nutrisi - Tidur",
-        "medis_rekam": "Medis - Rekam",
-        "medis_doping": "Medis - Doping",
-        "medis_alat": "Medis - Alat",
-        "medis_nonteknis": "Medis - Nonteknis",
-        "updated_at": "Diperbarui",
-        "created_at": "Dibuat",
+        "id": "ID", "tanggal": "Tanggal", "cabor": "Cabang Olahraga", "lokasi": "Lokasi", "petugas": "Petugas",
+        "status": "Status", "catatan_admin": "Catatan Admin", "daftar_hadir_koni": "Daftar Hadir Perwakilan KONI",
+        "fisik_parameter": "Fisik - Parameter", "fisik_peaking": "Fisik - Peaking", "fisik_recovery": "Fisik - Recovery", "fisik_cedera": "Fisik - Cedera",
+        "taktis_lawan": "Taktis - Lawan", "taktis_instruksi": "Taktis - Instruksi", "taktis_ujicoba": "Taktis - Ujicoba",
+        "mental_cemas": "Mental - Cemas", "mental_fokus": "Mental - Fokus", "mental_rutinitas": "Mental - Rutinitas", "mental_psikolog": "Mental - Psikolog",
+        "nutrisi_bb": "Nutrisi - BB", "nutrisi_asupan": "Nutrisi - Asupan", "nutrisi_hidrasi": "Nutrisi - Hidrasi", "nutrisi_tidur": "Nutrisi - Tidur",
+        "medis_rekam": "Medis - Rekam", "medis_doping": "Medis - Doping", "medis_alat": "Medis - Alat", "medis_nonteknis": "Medis - Nonteknis",
+        "updated_at": "Diperbarui", "created_at": "Dibuat",
     }
-    detail = detail.rename(
-        columns={k: v for k, v in rename_map.items() if k in detail.columns}
-    )
-
+    if not detail.empty:
+        detail = detail.rename(columns={k: v for k, v in rename_map.items() if k in detail.columns})
     out = BytesIO()
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
         detail.to_excel(writer, sheet_name="Laporan Monitoring", index=False)
     return out.getvalue()
-
 
 # ============================================================
 # UI COMPONENTS
@@ -875,15 +764,10 @@ def render_sidebar() -> None:
         st.markdown("## 🏆 BINPRES")
         st.caption("Monitoring & Evaluasi Cabor")
         st.markdown("---")
-        nama = (
-            user["nama_lengkap"]
-            if user and user["nama_lengkap"]
-            else st.session_state.get("username", "")
-        )
+        nama = user.get("nama_lengkap") if user and user.get("nama_lengkap") else st.session_state.get("username", "")
         st.write(f"👤 **{nama}**")
         st.caption(f"Role: {st.session_state.get('role', '').upper()}")
         st.markdown("---")
-
         with st.expander("🔑 Ganti Password"):
             with st.form("form_ganti_password"):
                 pw_lama = st.text_input("Password lama", type="password")
@@ -899,20 +783,13 @@ def render_sidebar() -> None:
                     else:
                         u = get_current_user()
                         if u and verify_password(pw_lama, u["password"]):
-                            with get_conn() as conn:
-                                conn.execute(
-                                    "UPDATE users SET password=? WHERE id=?",
-                                    (hash_password(pw_baru), u["id"]),
-                                )
-                                conn.commit()
+                            get_supabase().table("users").update({"password": hash_password(pw_baru)}).eq("id", int(u["id"])).execute()
                             st.success("Password berhasil diubah.")
                         else:
                             st.error("Password lama salah.")
-
         st.markdown("---")
         if st.button("🚪 Logout", use_container_width=True):
             logout()
-
 
 def halaman_login() -> None:
     st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -923,44 +800,29 @@ def halaman_login() -> None:
             <h1 style="margin-bottom:4px;color:#1e3a8a">Sistem Monitoring BINPRES</h1>
             <p style="color:#64748b;font-size:1.05rem">KONI Kabupaten Tangerang</p>
         </div>
-        """,
-        unsafe_allow_html=True,
+        """, unsafe_allow_html=True,
     )
-
     _, col_c, _ = st.columns([1, 1.4, 1])
     with col_c:
         with st.form("login_form"):
             st.markdown("#### Masuk ke Sistem")
             username = st.text_input("👤 Username", placeholder="Masukkan username")
-            password = st.text_input(
-                "🔒 Password", type="password", placeholder="Masukkan password"
-            )
-            submit = st.form_submit_button(
-                "Masuk ke Sistem", use_container_width=True, type="primary"
-            )
-
+            password = st.text_input("🔒 Password", type="password", placeholder="Masukkan password")
+            submit = st.form_submit_button("Masuk ke Sistem", use_container_width=True, type="primary")
             if submit:
-                with get_conn() as conn:
-                    user = conn.execute(
-                        "SELECT * FROM users WHERE username=? AND aktif=1",
-                        (username.strip(),),
-                    ).fetchone()
-
+                rows = _sb_data(get_supabase().table("users").select("*").eq("username", username.strip()).eq("aktif", True).limit(1).execute())
+                user = rows[0] if rows else None
                 if user and verify_password(password, user["password"]):
                     st.session_state["logged_in"] = True
                     st.session_state["username"] = user["username"]
                     st.session_state["role"] = user["role"]
-                    st.session_state["nama_lengkap"] = (
-                        user["nama_lengkap"] or user["username"]
-                    )
+                    st.session_state["nama_lengkap"] = user.get("nama_lengkap") or user["username"]
                     st.rerun()
                 else:
                     st.error("Username atau Password salah / akun tidak aktif.")
+        st.caption("Login utama: userkoni / koni123 • Database & foto tersimpan di Supabase")
 
-        st.caption("Login utama: userkoni / koni123 • Data tersimpan pada database SQLite lokal")
-
-
-def render_detail_laporan(row: sqlite3.Row) -> None:
+def render_detail_laporan(row: dict) -> None:
     st.markdown(
         f"**Cabor:** {row['cabor']} &nbsp;|&nbsp; "
         f"**Tanggal:** {row['tanggal']} &nbsp;|&nbsp; "
@@ -1057,7 +919,6 @@ def dashboard_admin() -> None:
 def kelola_user() -> None:
     st.subheader("👥 Manajemen User")
     st.dataframe(fetch_all_users(), use_container_width=True, hide_index=True)
-
     st.markdown("### ➕ Tambah User")
     with st.form("tambah_user"):
         col1, col2 = st.columns(2)
@@ -1067,7 +928,6 @@ def kelola_user() -> None:
         with col2:
             password = st.text_input("Password", type="password")
             role = st.selectbox("Hak akses", ["user", "admin"])
-
         if st.form_submit_button("Simpan User", use_container_width=True, type="primary"):
             if not username.strip() or not password:
                 st.error("Username dan password wajib diisi.")
@@ -1075,96 +935,41 @@ def kelola_user() -> None:
                 st.error("Password minimal 6 karakter.")
             else:
                 try:
-                    with get_conn() as conn:
-                        conn.execute(
-                            """INSERT INTO users
-                               (username, password, role, nama_lengkap, aktif)
-                               VALUES (?, ?, ?, ?, 1)""",
-                            (
-                                username.strip(),
-                                hash_password(password),
-                                role,
-                                nama.strip(),
-                            ),
-                        )
-                        conn.commit()
+                    get_supabase().table("users").insert({
+                        "username": username.strip(), "password": hash_password(password),
+                        "role": role, "nama_lengkap": nama.strip(), "aktif": True,
+                    }).execute()
                     st.success("User berhasil ditambahkan.")
                     st.rerun()
-                except sqlite3.IntegrityError:
-                    st.error("Username sudah digunakan.")
-
+                except Exception as exc:
+                    st.error(f"User gagal ditambahkan. Pastikan username belum digunakan. Detail: {exc}")
     st.markdown("### ✏️ Edit / Nonaktifkan User")
-    with get_conn() as conn:
-        users = [
-            dict(r)
-            for r in conn.execute(
-                "SELECT id, username, nama_lengkap, role, aktif FROM users ORDER BY username"
-            ).fetchall()
-        ]
-
+    users = _sb_data(get_supabase().table("users").select("id,username,nama_lengkap,role,aktif").order("username").execute())
     if not users:
         return
-
-    pilihan = st.selectbox(
-        "Pilih user",
-        users,
-        format_func=lambda x: f"{x['username']} — {x['nama_lengkap'] or '-'}",
-    )
-
+    pilihan = st.selectbox("Pilih user", users, format_func=lambda x: f"{x['username']} — {x.get('nama_lengkap') or '-'}")
     with st.form("edit_user"):
-        nama_baru = st.text_input("Nama lengkap", value=pilihan["nama_lengkap"] or "")
-        role_baru = st.selectbox(
-            "Role",
-            ["user", "admin"],
-            index=0 if pilihan["role"] == "user" else 1,
-        )
-        aktif_baru = st.checkbox("Akun aktif", value=bool(pilihan["aktif"]))
-        password_baru = st.text_input(
-            "Password baru (kosongkan jika tidak diubah)", type="password"
-        )
-
+        nama_baru = st.text_input("Nama lengkap", value=pilihan.get("nama_lengkap") or "")
+        role_baru = st.selectbox("Role", ["user", "admin"], index=0 if pilihan.get("role") == "user" else 1)
+        aktif_baru = st.checkbox("Akun aktif", value=bool(pilihan.get("aktif")))
+        password_baru = st.text_input("Password baru (kosongkan jika tidak diubah)", type="password")
         if st.form_submit_button("💾 Simpan Perubahan", use_container_width=True):
-            with get_conn() as conn:
-                if password_baru:
-                    if len(password_baru) < 6:
-                        st.error("Password minimal 6 karakter.")
-                        return
-                    conn.execute(
-                        """UPDATE users
-                           SET nama_lengkap=?, role=?, aktif=?, password=?
-                           WHERE id=?""",
-                        (
-                            nama_baru.strip(),
-                            role_baru,
-                            int(aktif_baru),
-                            hash_password(password_baru),
-                            pilihan["id"],
-                        ),
-                    )
-                else:
-                    conn.execute(
-                        """UPDATE users
-                           SET nama_lengkap=?, role=?, aktif=?
-                           WHERE id=?""",
-                        (
-                            nama_baru.strip(),
-                            role_baru,
-                            int(aktif_baru),
-                            pilihan["id"],
-                        ),
-                    )
-                conn.commit()
-            st.success("Data user berhasil diperbarui.")
-            st.rerun()
+            if password_baru and len(password_baru) < 6:
+                st.error("Password minimal 6 karakter.")
+                return
+            payload = {"nama_lengkap": nama_baru.strip(), "role": role_baru, "aktif": bool(aktif_baru)}
+            if password_baru:
+                payload["password"] = hash_password(password_baru)
+            try:
+                get_supabase().table("users").update(payload).eq("id", int(pilihan["id"])).execute()
+                st.success("Data user berhasil diperbarui.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Gagal memperbarui user: {exc}")
 
-
-# ------------------------------------------------------------
-# MANAJEMEN CABOR
-# ------------------------------------------------------------
 def kelola_cabor() -> None:
     st.subheader("🏅 Kelola Cabang Olahraga")
     st.dataframe(fetch_all_cabor(), use_container_width=True, hide_index=True)
-
     with st.form("tambah_cabor"):
         nama_cabor = st.text_input("Nama Cabang Olahraga Baru")
         if st.form_submit_button("➕ Tambah Cabor", use_container_width=True):
@@ -1172,48 +977,27 @@ def kelola_cabor() -> None:
                 st.error("Nama cabor wajib diisi.")
             else:
                 try:
-                    with get_conn() as conn:
-                        conn.execute(
-                            "INSERT INTO cabor (nama) VALUES (?)",
-                            (nama_cabor.strip().upper(),),
-                        )
-                        conn.commit()
+                    get_supabase().table("cabor").insert({"nama": nama_cabor.strip().upper(), "aktif": True}).execute()
                     st.success("Cabor berhasil ditambahkan.")
                     st.rerun()
-                except sqlite3.IntegrityError:
-                    st.error("Cabor tersebut sudah ada.")
-
+                except Exception as exc:
+                    st.error(f"Cabor tersebut mungkin sudah ada. Detail: {exc}")
     st.markdown("### ✏️ Edit / Nonaktifkan Cabor")
-    with get_conn() as conn:
-        rows = [
-            dict(r)
-            for r in conn.execute("SELECT * FROM cabor ORDER BY nama").fetchall()
-        ]
-
+    rows = _sb_data(get_supabase().table("cabor").select("*").order("nama").execute())
     if not rows:
         return
-
     pilihan = st.selectbox("Pilih cabor", rows, format_func=lambda x: x["nama"])
     with st.form("edit_cabor"):
         nama_baru = st.text_input("Nama cabor", value=pilihan["nama"])
         aktif = st.checkbox("Cabor aktif", value=bool(pilihan["aktif"]))
         if st.form_submit_button("💾 Simpan", use_container_width=True):
             try:
-                with get_conn() as conn:
-                    conn.execute(
-                        "UPDATE cabor SET nama=?, aktif=? WHERE id=?",
-                        (nama_baru.strip().upper(), int(aktif), pilihan["id"]),
-                    )
-                    conn.commit()
+                get_supabase().table("cabor").update({"nama": nama_baru.strip().upper(), "aktif": bool(aktif)}).eq("id", int(pilihan["id"])).execute()
                 st.success("Cabor berhasil diperbarui.")
                 st.rerun()
-            except sqlite3.IntegrityError:
-                st.error("Nama cabor sudah digunakan.")
+            except Exception as exc:
+                st.error(f"Gagal memperbarui cabor: {exc}")
 
-
-# ------------------------------------------------------------
-# LAPORAN ADMIN
-# ------------------------------------------------------------
 def halaman_laporan_admin() -> None:
     st.subheader("📄 Data Laporan Monitoring")
 
@@ -1310,15 +1094,11 @@ def halaman_laporan_admin() -> None:
 
     st.markdown("#### 📚 Export Rekap Word (semua hasil filter)")
     if st.button("Generate Word Rekap", use_container_width=True):
-        ids = tuple(int(x) for x in df["id"].tolist())
-        placeholders = ",".join("?" * len(ids))
-        with get_conn() as conn:
-            rows = conn.execute(
-                f"""SELECT * FROM laporan_monitoring
-                    WHERE id IN ({placeholders})
-                    ORDER BY tanggal ASC, id ASC""",
-                ids,
-            ).fetchall()
+        rows = []
+        for laporan_id in sorted(int(x) for x in df["id"].tolist()):
+            row_rekap = get_laporan_by_id(laporan_id)
+            if row_rekap:
+                rows.append(row_rekap)
         word_rekap = generate_word_report([dict(r) for r in rows], is_all=True)
         st.download_button(
             "⬇️ Download Rekap Word",
@@ -1343,14 +1123,11 @@ def halaman_laporan_admin() -> None:
             height=100,
         )
         if st.form_submit_button("💾 Simpan Tindak Lanjut", use_container_width=True):
-            with get_conn() as conn:
-                conn.execute(
-                    """UPDATE laporan_monitoring
-                       SET status=?, catatan_admin=?, updated_at=CURRENT_TIMESTAMP
-                       WHERE id=?""",
-                    (status, catatan, int(pilihan_id)),
-                )
-                conn.commit()
+            get_supabase().table("laporan_monitoring").update({
+                "status": status,
+                "catatan_admin": catatan,
+                "updated_at": _now_iso(),
+            }).eq("id", int(pilihan_id)).execute()
             st.success("Tindak lanjut berhasil diperbarui.")
             st.rerun()
 
@@ -1421,7 +1198,7 @@ def form_input_monitoring() -> None:
                 st.image(f, caption=f.name, use_container_width=True)
     else:
         st.info(
-            "Belum ada foto dipilih. Foto opsional, tapi disarankan untuk dokumentasi."
+            "Belum ada foto dipilih. Foto monitoring wajib minimal 1 foto."
         )
 
     st.markdown("---")
@@ -1540,48 +1317,40 @@ def form_input_monitoring() -> None:
             elif not daftar_hadir_koni.strip():
                 st.error("⚠️ Daftar hadir perwakilan KONI wajib diisi.")
             else:
-                with get_conn() as conn:
-                    cur = conn.execute(
-                        """INSERT INTO laporan_monitoring (
-                            tanggal, cabor, lokasi, petugas,
-                            fisik_parameter, fisik_peaking, fisik_recovery, fisik_cedera,
-                            taktis_lawan, taktis_instruksi, taktis_ujicoba,
-                            mental_cemas, mental_fokus, mental_rutinitas, mental_psikolog,
-                            nutrisi_bb, nutrisi_asupan, nutrisi_hidrasi, nutrisi_tidur,
-                            medis_rekam, medis_doping, medis_alat, medis_nonteknis,
-                            status, catatan_admin, daftar_hadir_koni
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                        (
-                            tanggal,
-                            cabor,
-                            lokasi.strip(),
-                            st.session_state["username"],
-                            fisik_1,
-                            fisik_2,
-                            fisik_3,
-                            fisik_4,
-                            taktis_1,
-                            taktis_2,
-                            taktis_3,
-                            mental_1,
-                            mental_2,
-                            mental_3,
-                            mental_4,
-                            nutrisi_1,
-                            nutrisi_2,
-                            nutrisi_3,
-                            nutrisi_4,
-                            medis_1,
-                            medis_2,
-                            medis_3,
-                            medis_4,
-                            DEFAULT_STATUS,
-                            "",
-                            daftar_hadir_koni.strip(),
-                        ),
-                    )
-                    laporan_id = cur.lastrowid
-                    conn.commit()
+                payload_laporan = {
+                    "tanggal": tanggal.isoformat(),
+                    "cabor": cabor,
+                    "lokasi": lokasi.strip(),
+                    "petugas": st.session_state["username"],
+                    "fisik_parameter": fisik_1,
+                    "fisik_peaking": fisik_2,
+                    "fisik_recovery": fisik_3,
+                    "fisik_cedera": fisik_4,
+                    "taktis_lawan": taktis_1,
+                    "taktis_instruksi": taktis_2,
+                    "taktis_ujicoba": taktis_3,
+                    "mental_cemas": mental_1,
+                    "mental_fokus": mental_2,
+                    "mental_rutinitas": mental_3,
+                    "mental_psikolog": mental_4,
+                    "nutrisi_bb": nutrisi_1,
+                    "nutrisi_asupan": nutrisi_2,
+                    "nutrisi_hidrasi": nutrisi_3,
+                    "nutrisi_tidur": nutrisi_4,
+                    "medis_rekam": medis_1,
+                    "medis_doping": medis_2,
+                    "medis_alat": medis_3,
+                    "medis_nonteknis": medis_4,
+                    "status": DEFAULT_STATUS,
+                    "catatan_admin": "",
+                    "daftar_hadir_koni": daftar_hadir_koni.strip(),
+                }
+                result_insert = get_supabase().table("laporan_monitoring").insert(payload_laporan).execute()
+                inserted_rows = _sb_data(result_insert)
+                if not inserted_rows:
+                    st.error("Laporan gagal disimpan ke Supabase.")
+                    st.stop()
+                laporan_id = int(inserted_rows[0]["id"])
 
                 files_to_save = (
                     st.session_state.get("uploader_monitoring")
@@ -1716,7 +1485,7 @@ def halaman_user() -> None:
 # ============================================================
 # ENTRY POINT
 # ============================================================
-init_db()
+init_backend()
 
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
