@@ -557,173 +557,144 @@ def _add_compact_para(doc, text: str, bold: bool = False, size: float = 10, spac
     _set_run_font(run, size_pt=size, bold=bold)
 
 
+TEMPLATE_DOCX_PATH = Path(__file__).with_name("Template_Laporan_Monev_BINPRES_KONI(2).docx")
+
+
+def _set_cell_text_preserving_style(cell, text: str, paragraph_index: int = 0) -> None:
+    """Isi teks pada sel tanpa mengubah struktur tabel template."""
+    paragraphs = cell.paragraphs
+    if not paragraphs:
+        cell.add_paragraph()
+        paragraphs = cell.paragraphs
+    p = paragraphs[min(paragraph_index, len(paragraphs) - 1)]
+    # Kosongkan run yang ada, lalu isi ulang agar placeholder tidak tertinggal.
+    for run in p.runs:
+        run.text = ""
+    p.add_run(str(text or "").strip())
+
+
+def _fill_template_report(data: Dict[str, Any], include_photos: bool = True) -> Document:
+    if not TEMPLATE_DOCX_PATH.exists():
+        raise FileNotFoundError(
+            f"File template tidak ditemukan: {TEMPLATE_DOCX_PATH.name}. "
+            "Upload file template tersebut ke repository GitHub yang sama dengan app.py."
+        )
+
+    doc = Document(str(TEMPLATE_DOCX_PATH))
+    tables = doc.tables
+    if len(tables) < 8:
+        raise ValueError("Struktur tabel template tidak sesuai. Pastikan menggunakan template Monev BINPRES yang benar.")
+
+    # Tabel informasi dasar: label berada di kolom 0/2 dan nilai di kolom 1/3.
+    info = [
+        (0, 1, data.get("cabor", "")),
+        (0, 3, data.get("tanggal", "")),
+        (1, 1, data.get("lokasi", "")),
+        (1, 3, data.get("petugas", "")),
+        (2, 1, data.get("status") or DEFAULT_STATUS),
+        (2, 3, "Lihat daftar hadir di bawah" if data.get("daftar_hadir_koni") else "—"),
+    ]
+    for row_idx, col_idx, value in info:
+        _set_cell_text_preserving_style(tables[0].cell(row_idx, col_idx), str(value or "—"))
+
+    # Jawaban diisi pada paragraf kosong di bawah pertanyaan, pada kotak template asli.
+    section_tables = [
+        ("fisik_parameter", "fisik_peaking", "fisik_recovery", "fisik_cedera"),
+        ("taktis_lawan", "taktis_instruksi", "taktis_ujicoba"),
+        ("mental_cemas", "mental_fokus", "mental_rutinitas", "mental_psikolog"),
+        ("nutrisi_bb", "nutrisi_asupan", "nutrisi_hidrasi", "nutrisi_tidur"),
+        ("medis_rekam", "medis_doping", "medis_alat", "medis_nonteknis"),
+    ]
+    for table_idx, keys in enumerate(section_tables, start=1):
+        table = tables[table_idx]
+        for row_idx, key in enumerate(keys):
+            cell = table.cell(row_idx, 0)
+            answer = str(data.get(key) or "").strip()
+            # Pada template, setiap kotak jawaban mempunyai paragraf kosong setelah pertanyaan.
+            if len(cell.paragraphs) >= 2:
+                _set_cell_text_preserving_style(cell, answer, len(cell.paragraphs) - 1)
+            else:
+                cell.add_paragraph(answer)
+
+    # Daftar hadir: kolom kanan tabel berisi nama perwakilan KONI.
+    hadir = str(data.get("daftar_hadir_koni") or "").strip()
+    names = [x.strip() for x in re.split(r"[\n,;]+", hadir) if x.strip()]
+    for i in range(5):
+        _set_cell_text_preserving_style(tables[6].cell(i, 1), names[i] if i < len(names) else "")
+
+    # Dokumentasi: masukkan hingga 4 foto ke kotak pada template.
+    fotos = get_fotos_by_laporan(int(data["id"])) if include_photos and data.get("id") else []
+    photo_cells = [tables[7].cell(0, 0), tables[7].cell(0, 1), tables[7].cell(1, 0), tables[7].cell(1, 1)]
+    used = 0
+    for idx, cell in enumerate(photo_cells):
+        label = f"FOTO {idx + 1}"
+        # Pertahankan judul FOTO 1-4, hapus teks placeholder "Tempat foto".
+        for p in cell.paragraphs:
+            for run in p.runs:
+                if "Tempat foto" in run.text:
+                    run.text = run.text.replace("Tempat foto", "")
+        if idx < len(fotos):
+            raw = get_foto_bytes(fotos[idx])
+            if raw:
+                try:
+                    cell.add_paragraph().add_run().add_picture(BytesIO(raw), width=Inches(2.45))
+                    used += 1
+                except Exception:
+                    cell.add_paragraph("[Foto tidak dapat dimuat]")
+        # Jika tidak ada foto, kotak dokumentasi tetap kosong sesuai template.
+
+    # Foto ke-5 dan seterusnya tetap disertakan setelah halaman template.
+    if len(fotos) > 4:
+        doc.add_page_break()
+        h = doc.add_paragraph()
+        h.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = h.add_run("DOKUMENTASI FOTO TAMBAHAN")
+        _set_run_font(r, size_pt=12, bold=True)
+        for foto in fotos[4:]:
+            raw = get_foto_bytes(foto)
+            if raw:
+                try:
+                    doc.add_picture(BytesIO(raw), width=Inches(5.2))
+                    cap = doc.add_paragraph()
+                    cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    cr = cap.add_run(
+                        f'{foto.get("original_name") or foto.get("filename") or "Foto"}'
+                        f' | Time-mark: {foto.get("timestamp_mark") or "-"}'
+                    )
+                    _set_run_font(cr, size_pt=8)
+                except Exception:
+                    _add_compact_para(doc, f'[Foto tidak dapat dimuat: {foto.get("original_name", "Foto")}]', size=9)
+    return doc
+
+
 def generate_word_report(
     data_list: List[Dict[str, Any]],
     is_all: bool = False,
     include_photos: bool = True,
 ) -> bytes:
-    """
-    Layout hemat kertas:
-    - Margin kecil, font 10pt, spasi rapat
-    - Lembar isi laporan dulu
-    - Lembar foto terpisah (halaman baru) di akhir tiap laporan
-    - 1 file Word
-    """
-    doc = Document()
-    section = doc.sections[0]
-    # Margin rapat (hemat kertas)
-    section.top_margin = Inches(0.5)
-    section.bottom_margin = Inches(0.5)
-    section.left_margin = Inches(0.6)
-    section.right_margin = Inches(0.6)
+    """Hasilkan Word dengan memakai template resmi Monev BINPRES yang diunggah."""
+    if not data_list:
+        raise ValueError("Tidak ada data laporan untuk dibuat menjadi Word.")
 
-    # Style default body
-    style = doc.styles["Normal"]
-    style.font.name = "Calibri"
-    style.font.size = Pt(10)
-    style.paragraph_format.space_before = Pt(0)
-    style.paragraph_format.space_after = Pt(2)
-    style.paragraph_format.line_spacing = 1.0
+    # Untuk satu laporan, langsung gunakan template asli agar tata letaknya tetap utuh.
+    if len(data_list) == 1:
+        doc = _fill_template_report(data_list[0], include_photos=include_photos)
+        buf = BytesIO()
+        doc.save(buf)
+        return buf.getvalue()
 
-    judul = "REKAPITULASI LAPORAN MONEV BINPRES" if is_all else "LAPORAN MONEV BINPRES"
-    title = doc.add_heading(judul, level=1)
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    for run in title.runs:
-        run.font.size = Pt(14)
-        run.font.name = "Calibri"
+    # Rekap banyak laporan: gabungkan dokumen-dokumen berbasis template.
+    try:
+        from docxcompose.composer import Composer
+    except ImportError as exc:
+        raise RuntimeError("Paket docxcompose belum terpasang. Tambahkan docxcompose ke requirements.txt.") from exc
 
-    meta = doc.add_paragraph()
-    meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    meta.paragraph_format.space_after = Pt(6)
-    r = meta.add_run(
-        f"KONI Kabupaten Tangerang  |  Dicetak: {datetime.date.today().strftime('%d/%m/%Y')}"
-    )
-    _set_run_font(r, size_pt=9)
-
-    def add_info_line(label: str, value: Any) -> None:
-        p = doc.add_paragraph()
-        p.paragraph_format.space_before = Pt(0)
-        p.paragraph_format.space_after = Pt(1)
-        p.paragraph_format.line_spacing = 1.0
-        r1 = p.add_run(f"{label}: ")
-        _set_run_font(r1, size_pt=10, bold=True)
-        r2 = p.add_run(str(value) if value else "-")
-        _set_run_font(r2, size_pt=10)
-
-    def add_section_compact(title_text: str, items: List[Tuple[str, Any]]) -> None:
-        # Judul section
-        h = doc.add_paragraph()
-        h.paragraph_format.space_before = Pt(6)
-        h.paragraph_format.space_after = Pt(2)
-        hr = h.add_run(title_text)
-        _set_run_font(hr, size_pt=11, bold=True)
-
-        for question, answer in items:
-            # Pertanyaan + jawaban dalam 1 blok rapat
-            pq = doc.add_paragraph()
-            pq.paragraph_format.space_before = Pt(2)
-            pq.paragraph_format.space_after = Pt(0)
-            pq.paragraph_format.line_spacing = 1.0
-            rq = pq.add_run(f"• {question}")
-            _set_run_font(rq, size_pt=9, bold=True)
-
-            pa = doc.add_paragraph()
-            pa.paragraph_format.space_before = Pt(0)
-            pa.paragraph_format.space_after = Pt(2)
-            pa.paragraph_format.line_spacing = 1.0
-            pa.paragraph_format.left_indent = Inches(0.15)
-            ra = pa.add_run(str(answer).strip() if answer and str(answer).strip() else "—")
-            _set_run_font(ra, size_pt=9)
-
-    # Kumpulkan foto per laporan untuk halaman terpisah
-    photos_queue: List[Tuple[Dict[str, Any], list]] = []
-
-    for idx, data in enumerate(data_list):
-        if is_all and idx > 0:
-            doc.add_page_break()
-
-        if is_all:
-            h = doc.add_paragraph()
-            h.paragraph_format.space_before = Pt(4)
-            h.paragraph_format.space_after = Pt(4)
-            hr = h.add_run(
-                f"Laporan {idx + 1}: {data.get('cabor', '-')} — {data.get('tanggal', '-')}"
-            )
-            _set_run_font(hr, size_pt=12, bold=True)
-
-        # --- Lembar isi (rapat) ---
-        add_info_line("Cabang Olahraga", data.get("cabor"))
-        add_info_line("Tanggal", data.get("tanggal"))
-        add_info_line("Lokasi", data.get("lokasi"))
-        add_info_line("Petugas Monev", data.get("petugas"))
-        add_info_line("Status", data.get("status") or DEFAULT_STATUS)
-        add_info_line("Perwakilan KONI yang Hadir", data.get("daftar_hadir_koni"))
-
-        # Garis pemisah tipis
-        sep = doc.add_paragraph()
-        sep.paragraph_format.space_before = Pt(2)
-        sep.paragraph_format.space_after = Pt(2)
-        sr = sep.add_run("─" * 55)
-        _set_run_font(sr, size_pt=8)
-
-        for section_title, fields in FIELD_LABELS.items():
-            items = [(label, data.get(key)) for key, label in fields]
-            add_section_compact(section_title, items)
-
-        if data.get("catatan_admin"):
-            add_section_compact("Catatan Admin / Tindak Lanjut", [
-                ("Catatan", data["catatan_admin"]),
-            ])
-
-        # Simpan foto untuk halaman terpisah
-        if include_photos and data.get("id"):
-            fotos = get_fotos_by_laporan(int(data["id"]))
-            if fotos:
-                photos_queue.append((data, fotos))
-
-    # --- Lembar foto terpisah (di akhir, tetap 1 file) ---
-    if include_photos and photos_queue:
-        for data, fotos in photos_queue:
-            doc.add_page_break()
-
-            h = doc.add_paragraph()
-            h.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            h.paragraph_format.space_after = Pt(4)
-            hr = h.add_run("DOKUMENTASI FOTO")
-            _set_run_font(hr, size_pt=12, bold=True)
-
-            sub = doc.add_paragraph()
-            sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            sub.paragraph_format.space_after = Pt(8)
-            sr = sub.add_run(
-                f"{data.get('cabor', '-')}  |  {data.get('tanggal', '-')}  |  "
-                f"{data.get('lokasi', '-')}  |  Petugas: {data.get('petugas', '-')}"
-            )
-            _set_run_font(sr, size_pt=9)
-
-            for foto in fotos:
-                img_bytes = get_foto_bytes(foto)
-                if img_bytes:
-                    try:
-                        # Lebar sedang agar hemat ruang, bisa 2 foto per halaman
-                        doc.add_picture(BytesIO(img_bytes), width=Inches(5.2))
-                        cap = doc.add_paragraph()
-                        cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        cap.paragraph_format.space_before = Pt(2)
-                        cap.paragraph_format.space_after = Pt(8)
-                        cr = cap.add_run(f'{foto["original_name"] or foto["filename"]} | Time-mark: {foto["timestamp_mark"] or "-"}')
-                        _set_run_font(cr, size_pt=8)
-                    except Exception:
-                        _add_compact_para(
-                            doc, f"[Gagal memuat: {foto['original_name']}]", size=9
-                        )
-                else:
-                    _add_compact_para(
-                        doc, f"[Foto tidak tersedia: {foto['original_name']}]", size=9
-                    )
-
+    first_doc = _fill_template_report(data_list[0], include_photos=include_photos)
+    composer = Composer(first_doc)
+    for item in data_list[1:]:
+        composer.append(_fill_template_report(item, include_photos=include_photos))
     buf = BytesIO()
-    doc.save(buf)
+    composer.save(buf)
     return buf.getvalue()
 
 
